@@ -1,5 +1,10 @@
 # Silo Requests: Riven
 
+> Forked from
+> [olivertgwalton/silo-plugins-request-riven](https://github.com/olivertgwalton/silo-plugins-request-riven),
+> which targets riven-rs. This fork targets riven-ts instead and has no webhook
+> scan source.
+
 A Silo plugin that sends Silo's movie and series requests to a
 [riven-ts](https://github.com/rivenmedia/riven-ts) instance through its GraphQL
 API, and reports their progress back to Silo. It implements
@@ -7,10 +12,38 @@ API, and reports their progress back to Silo. It implements
 [Seerr plugin](https://github.com/Silo-Community/silo-plugins-requests-seerr),
 no Seerr instance is involved.
 
+## Install
+
+Silo's built-in catalogs do not list this plugin. Install it from this repo's
+catalog, or upload a binary.
+
+**From the catalog.** In Silo, add a plugin repository with this URL, then
+install **Riven Requests** from it. Silo downloads the binary for its platform
+from this repo's latest release.
+
+```
+https://raw.githubusercontent.com/evo-de/silo-plugins-request-riven/main/index.json
+```
+
+**From a binary.** Download the binary for Silo's platform from the
+[latest release](https://github.com/evo-de/silo-plugins-request-riven/releases/latest),
+or build it as described under [Build and test](#build-and-test). Upload it on
+Silo's plugin admin page, or with a Silo admin API key.
+
+```sh
+curl -H "Authorization: Bearer $SILO_API_KEY" \
+  -F archive=@plugin-linux-amd64 \
+  "$SILO_URL/api/v2/admin/plugins/uploads"
+```
+
+Silo runs the binary to read its manifest. An upload replaces any installed
+plugin with the same id, `silo.requests.riven`. That includes the upstream
+riven-rs plugin.
+
 ## Connect Silo to riven-ts
 
-Each Riven connection in Silo has a base URL and an API key. The plugin has no
-other settings.
+Each Riven request server in Silo has a base URL and an API key. The plugin has
+no other settings.
 
 1. Set `RIVEN_SETTING__apiKey` on riven-ts to a key of at least 32 characters,
    for example the output of `openssl rand -hex 32`. If the setting is unset,
@@ -19,9 +52,14 @@ other settings.
 2. If Silo reaches riven-ts from another host or container, set
    `RIVEN_SETTING__host=0.0.0.0`. By default riven-ts listens on localhost
    only.
-3. In Silo, add a Riven connection. Set the base URL to riven-ts's address. The
-   default port is 3000, for example `http://riven:3000`. Set the API key to the
-   value of `RIVEN_SETTING__apiKey`.
+3. In Silo, add a request server that uses the Riven plugin. Set the base URL
+   to riven-ts's address. The default port is 3000, for example
+   `http://riven:3000`. Set the API key to the value of
+   `RIVEN_SETTING__apiKey`.
+4. Route movies and series to the Riven server in Silo's request routing.
+   Silo refuses Standard routing while a media type has more than one server
+   of the same kind. Disable any other request server for those media types,
+   or switch to Advanced routing.
 
 The plugin sends the key as `Authorization: Bearer <key>`. **Test connection**
 reads a field that riven-ts answers only for a valid key, so a wrong key fails
@@ -73,11 +111,30 @@ This plugin does not scan downloads into Silo's library. riven-ts does that
 through its own Silo plugin, `@repo/plugin-silo`, which you configure on the
 riven-ts side.
 
-## Build / test
+## Build and test
 
 ```
 go build ./... && go test ./...
 ```
+
+To build a binary to upload, set the target platform. For example, for
+linux/amd64:
+
+```
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/plugin-linux-amd64 .
+```
+
+`index.json` repeats `manifest.json` for the catalog. A test fails when the two
+differ.
+
+## Release
+
+Run the **Release** workflow, or push a `v*` tag. The workflow builds
+`plugin-linux-amd64`, `plugin-linux-arm64`, and `plugin-darwin-arm64`, and
+publishes them with `checksums.txt` as a GitHub release. The catalog in
+`index.json` always points at the latest release. A manual run releases
+`manifest.json`'s version when the repo has no `v*` tag yet. After that, each
+manual run bumps the patch version of the latest tag.
 
 ## Maintenance
 
