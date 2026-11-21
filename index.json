@@ -51,31 +51,6 @@
                 }
               }
             ]
-          },
-          {
-            "type": "scan_source.v1",
-            "id": "riven",
-            "display_name": "Riven",
-            "description": "Scan riven-rs downloads into the library as riven's autoscan webhook reports them finished.",
-            "config_schema": [
-              {
-                "key": "connection",
-                "title": "Riven",
-                "json_schema": "{\"type\":\"object\",\"properties\":{}}",
-                "admin_form": {
-                  "submit_label": "Save connection",
-                  "fields": []
-                }
-              }
-            ]
-          }
-        ],
-        "http_routes": [
-          {
-            "id": "riven-webhook",
-            "method": "POST",
-            "path": "/webhook",
-            "access": "public"
           }
         ]
       },
