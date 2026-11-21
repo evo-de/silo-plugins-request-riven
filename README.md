@@ -1,118 +1,140 @@
 # Silo Requests: Riven
 
-A Silo plugin that connects to a [riven-rs](https://github.com/rivenmedia/riven-rs)
-instance's GraphQL API for two capabilities:
+> Forked from
+> [olivertgwalton/silo-plugins-request-riven](https://github.com/olivertgwalton/silo-plugins-request-riven),
+> which targets riven-rs. This fork targets riven-ts instead and has no webhook
+> scan source.
 
-- **`request_router.v1`**: fulfills content requests directly against riven's
-  native request API (`requestMovie` / `requestShow`). Unlike the
-  [Seerr plugin](https://github.com/Silo-Community/silo-plugins-requests-seerr),
-  no Seerr instance is involved: riven tracks and scrapes the request itself.
-- **`scan_source.v1`** (+ **`http_routes.v1`**): receives riven's outbound
-  webhook when a download finishes and reports the file paths it carries so
-  Silo's autoscan engine scans them into the library — no polling of riven's
-  DB/GraphQL. See [Scan source](#scan-source) below.
+A Silo plugin that sends Silo's movie and series requests to a
+[riven-ts](https://github.com/rivenmedia/riven-ts) instance through its GraphQL
+API, and reports their progress back to Silo. It implements
+`request_router.v1`. Unlike the
+[Seerr plugin](https://github.com/Silo-Community/silo-plugins-requests-seerr),
+no Seerr instance is involved.
 
-Both capabilities can be bound to the same Riven connection.
+## Install
 
-## Connection config
+Silo's built-in catalogs do not list this plugin. Install it from this repo's
+catalog, or upload a binary.
 
-Each connection carries a riven **base URL** (e.g. `http://localhost:8080`)
-and **API key** (host chrome) — the value of `RIVEN_SETTING__API_KEY` on that
-riven-rs instance. There are no additional plugin settings: riven has no
-per-connection quality profile or requester-mapping concept.
+**From the catalog.** In Silo, add a plugin repository with this URL, then
+install **Riven Requests** from it. Silo downloads the binary for its platform
+from this repo's latest release.
 
-## API key requirement
+```
+https://raw.githubusercontent.com/evo-de/silo-plugins-request-riven/main/index.json
+```
 
-The API key must match riven's `RIVEN_SETTING__API_KEY`. Non-frontend GraphQL
-callers (anything without riven's frontend-signing headers) that present a
-valid key are treated as trusted/admin, so every request submitted by this
-plugin is accepted immediately — riven has no per-user approval queue.
-`TestConnection` runs a minimal `{ __typename }` query to surface an invalid
-key or unreachable host.
+**From a binary.** Download the binary for Silo's platform from the
+[latest release](https://github.com/evo-de/silo-plugins-request-riven/releases/latest),
+or build it as described under [Build and test](#build-and-test). Upload it on
+Silo's plugin admin page, or with a Silo admin API key.
+
+```sh
+curl -H "Authorization: Bearer $SILO_API_KEY" \
+  -F archive=@plugin-linux-amd64 \
+  "$SILO_URL/api/v2/admin/plugins/uploads"
+```
+
+Silo runs the binary to read its manifest. An upload replaces any installed
+plugin with the same id, `silo.requests.riven`. That includes the upstream
+riven-rs plugin.
+
+## Connect Silo to riven-ts
+
+Each Riven request server in Silo has a base URL and an API key. The plugin has
+no other settings.
+
+1. Set `RIVEN_SETTING__apiKey` on riven-ts to a key of at least 32 characters,
+   for example the output of `openssl rand -hex 32`. If the setting is unset,
+   riven-ts generates a new key on every start, and the plugin cannot
+   authenticate.
+2. If Silo reaches riven-ts from another host or container, set
+   `RIVEN_SETTING__host=0.0.0.0`. By default riven-ts listens on localhost
+   only.
+3. In Silo, add a request server that uses the Riven plugin. Set the base URL
+   to riven-ts's address. The default port is 3000, for example
+   `http://riven:3000`. Set the API key to the value of
+   `RIVEN_SETTING__apiKey`.
+4. Route movies and series to the Riven server in Silo's request routing.
+   Silo refuses Standard routing while a media type has more than one server
+   of the same kind. Disable any other request server for those media types,
+   or switch to Advanced routing.
+
+The plugin sends the key as `Authorization: Bearer <key>`. **Test connection**
+reads a field that riven-ts answers only for a valid key, so a wrong key fails
+the test.
+
+If Silo and riven-ts run in separate Docker Compose projects,
+`http://localhost:3000` does not reach riven-ts from inside Silo's container.
+Use `http://host.docker.internal:3000`, or put both containers on a shared
+Docker network.
 
 ## How requests map
 
-- Movies call `requestMovie`; series call `requestShow` (all non-special
-  seasons — riven's request descriptor has no per-season field to narrow
-  this). Media is identified by **TMDB id** (movies) or **TVDB id** (series),
-  falling back to **IMDB id** for either.
-- Riven has no per-quality profile distinction — its own scraper/ranking
-  config picks the best available release — so the request is submitted to
-  riven exactly once per connection regardless of how many quality tiers
-  Silo asks for. Silo requires one `FulfillmentTarget` per requested quality
-  (a tier with no matching target gets marked failed), so that single
-  outcome is echoed back once per tier, all sharing the same external id
-  and status.
-- A duplicate request (riven returns `success: false` with no `item`) is
-  treated as already-queued.
-- `requested_by` is set to the literal string `"silo"`, matching riven's own
-  doc comment that the field identifies the *originating system*, not the
-  individual requester — riven has no per-user identity to attribute to.
-- `CheckStatus` re-queries `mediaItemByTmdb` / `mediaItemByTvdb` /
-  `mediaItemByImdb` for the item's current `state` and maps riven's state
-  machine (`Indexed`, `Unreleased`, `Scraped`, `Ongoing`,
-  `PartiallyCompleted`, `Completed`, `Paused`, `Failed`) onto Silo's
-  normalized `queued` / `downloading` / `completed` / `failed`.
+- The plugin submits each request with riven-ts's `requestItem` mutation.
+  A series request asks for every non-special season.
+- A movie needs a TMDB id and a series needs a TVDB id, because riven-ts tracks
+  items by those ids. Silo fails a request that lacks the right id, even when
+  it has an IMDb id. riven-ts accepts an IMDb-only request but fails it later.
+- riven-ts picks the release itself and has no quality profiles. The plugin
+  sends one request per connection and reports the same result for every
+  quality Silo asks for.
+- `requestedBy` is always `silo`. riven-ts has no per-user identity.
+- riven-ts reports nothing back about duplicates or rejections. It answers
+  `requestItem` before it processes the request, so a request that riven-ts
+  drops stays `queued` in Silo.
 
-## Scan source
+## How status maps
 
-Instead of polling riven's DB/GraphQL, the plugin is driven by riven's own
-outbound webhook (the riven-rs `webhooks` plugin). It registers an HTTP route —
-`POST /webhook` — that the host exposes; point riven's webhook URL setting at
-that route's public URL. On every notable state change riven POSTs a signed
-JSON envelope; on `riven.media-item.download.success` the envelope carries the
-VFS paths of the files the download made available, under
-`data.filesystem_paths`. The plugin ignores every other event and buffers those
-paths.
+The plugin looks up the request with `itemRequestByExternalIds` and reads the
+state of the request's primary media item. The request's own state is not
+enough, because riven-ts marks a released movie's request `completed` as soon
+as it indexes the movie.
 
-> **Requires riven-rs with the `filesystem_paths` field.** Stock riven-rs
-> emits `download.success` without the file paths, so the envelope alone can't
-> drive a scan. This plugin pairs with a riven-rs build whose
-> `MediaItemDownloadSuccess` event includes `filesystem_paths` (resolved from
-> `filesystem_entries` at emit time — a season/show carries every child
-> episode's path). Against stock riven-rs the webhook is received and ack'd but
-> reports no changes.
+| riven-ts state | Silo status |
+| --- | --- |
+| No request | `queued` |
+| Request `failed` | `failed` |
+| No media item yet | `queued` |
+| Media `completed` | `completed` |
+| Media `failed` or `paused` | `failed` |
+| Media `scraped`, `downloaded`, or `partially_completed` | `downloading` |
+| Media `indexed`, `unreleased`, or any other state | `queued` |
 
-Silo drains the buffer on the scan source's poll tick: each buffered path is
-returned as a `file`-scoped change, and Silo applies the source's configured
-path rewrites (translating riven's VFS path, e.g. `/mount/...`, to wherever
-Silo's library actually sees that path) before enqueuing a scan. The drain is
-destructive — a path is reported once — and there is no continuation marker,
-because webhook delivery (not a diff against riven's state) is what makes a
-path "new". Nothing is replayed when a source is first bound: only downloads
-that finish afterward are scanned.
+Silo shows the media item's state as the external status. Before riven-ts
+indexes the item, it shows the request's state.
 
-### Setup
+## Library scans
 
-1. In riven, configure the `webhooks` plugin: add the host-exposed URL for this
-   plugin's `/webhook` route to **Webhook URLs**, and (optionally) narrow the
-   **Event Filter** to `riven.media-item.download.success`.
-2. In Silo's Plugins page, install this scan source and set a poll interval
-   (the default applies if left unset) — the interval only governs how quickly
-   buffered webhooks are drained, not how riven is queried.
+This plugin does not scan downloads into Silo's library. riven-ts does that
+through its own Silo plugin, `@repo/plugin-silo`, which you configure on the
+riven-ts side.
 
-**Security:** the `/webhook` route is declared with `public` access so riven
-(an external caller with no Silo session) can reach it. The plugin does not see
-riven's webhook signing secret, so it can't verify the `x-riven-signature`
-header — protect the route at the network / reverse-proxy layer.
-
-**Known limitations:**
-
-- **Single connection.** The webhook carries no installation identity, so
-  buffered paths are process-global. With more than one bound Riven scan
-  source, a webhook is delivered to whichever source drains first; run a
-  single scan source per Silo instance.
-- **Deletions are not detected.** riven's deletion event is not consumed; if
-  riven removes a completed item's files, this source will not notice. Run a
-  manual or scheduled library scan to reconcile removals.
-- **No restart recovery.** A webhook that arrives while the plugin is down is
-  not retried; the next completion or a manual scan reconciles it.
-
-## Build / test
+## Build and test
 
 ```
 go build ./... && go test ./...
 ```
+
+To build a binary to upload, set the target platform. For example, for
+linux/amd64:
+
+```
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/plugin-linux-amd64 .
+```
+
+`index.json` repeats `manifest.json` for the catalog. A test fails when the two
+differ.
+
+## Release
+
+Run the **Release** workflow, or push a `v*` tag. The workflow builds
+`plugin-linux-amd64`, `plugin-linux-arm64`, and `plugin-darwin-arm64`, and
+publishes them with `checksums.txt` as a GitHub release. The catalog in
+`index.json` always points at the latest release. A manual run releases
+`manifest.json`'s version when the repo has no `v*` tag yet. After that, each
+manual run bumps the patch version of the latest tag.
 
 ## Maintenance
 
