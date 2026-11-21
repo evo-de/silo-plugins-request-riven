@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -12,11 +13,18 @@ import (
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
 )
 
+const unauthenticated = `{"data":null,"errors":[{"message":"Access denied! You need to be authenticated to perform this action!","extensions":{"code":"UNAUTHENTICATED"}}]}`
+
+type gqlCall struct {
+	Query     string         `json:"query"`
+	Variables map[string]any `json:"variables"`
+}
+
 // gqlStub serves a fixed GraphQL response body for every /graphql POST and
 // records the decoded request bodies it received.
 type gqlStub struct {
 	mu        sync.Mutex
-	bodies    []gqlRequest
+	calls     []gqlCall
 	responses []string // one response body per call, in order; last is reused once exhausted
 }
 
@@ -26,12 +34,12 @@ func (s *gqlStub) handler() http.Handler {
 			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 			return
 		}
-		var body gqlRequest
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		var call gqlCall
+		_ = json.NewDecoder(r.Body).Decode(&call)
 
 		s.mu.Lock()
-		s.bodies = append(s.bodies, body)
-		idx := len(s.bodies) - 1
+		s.calls = append(s.calls, call)
+		idx := len(s.calls) - 1
 		s.mu.Unlock()
 
 		if idx >= len(s.responses) {
@@ -47,7 +55,7 @@ func newStub(t *testing.T, responses ...string) (*gqlStub, *httpclient.Client) {
 	stub := &gqlStub{responses: responses}
 	srv := httptest.NewServer(stub.handler())
 	t.Cleanup(srv.Close)
-	return stub, httpclient.New(srv.URL, "k", nil)
+	return stub, NewClient(srv.URL, "k")
 }
 
 func TestNewClientSendsBearerToken(t *testing.T) {
@@ -67,117 +75,113 @@ func TestNewClientSendsBearerToken(t *testing.T) {
 	}
 }
 
-func TestRequestMovieSuccess(t *testing.T) {
-	stub, client := newStub(t, `{"data":{"requestMovie":{"success":true,"message":"Movie request created successfully.","item":{"state":"REQUESTED"}}}}`)
+func TestRequestItemSendsOnlyTheItemsID(t *testing.T) {
+	cases := []struct {
+		name      string
+		item      Item
+		wantInput map[string]any
+	}{
+		{"movie by TMDB", Item{Type: Movie, ID: "42"}, map[string]any{"type": "movie", "tmdbId": "42", "requestedBy": "silo"}},
+		{"show by TVDB", Item{Type: Show, ID: "99"}, map[string]any{"type": "show", "tvdbId": "99", "requestedBy": "silo"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub, client := newStub(t, `{"data":{"requestItem":true}}`)
 
-	title := "Arrival"
-	tmdb := "42"
-	requestedBy := "silo"
-	outcome, err := RequestMovie(context.Background(), client, title, nil, &tmdb, &requestedBy)
-	if err != nil {
-		t.Fatalf("RequestMovie: %v", err)
-	}
-	if !outcome.Success || outcome.Conflict || outcome.State != "REQUESTED" {
-		t.Fatalf("bad outcome: %+v", outcome)
-	}
-
-	if len(stub.bodies) != 1 {
-		t.Fatalf("want 1 request, got %d", len(stub.bodies))
-	}
-	vars, ok := stub.bodies[0].Variables.(map[string]any)
-	if !ok {
-		t.Fatalf("bad variables: %#v", stub.bodies[0].Variables)
-	}
-	input, ok := vars["input"].(map[string]any)
-	if !ok {
-		t.Fatalf("bad input: %#v", vars)
-	}
-	if input["title"] != title || input["tmdbId"] != tmdb || input["requestedBy"] != requestedBy {
-		t.Fatalf("bad input: %+v", input)
-	}
-	if _, present := input["imdbId"]; present {
-		t.Fatalf("imdbId must be omitted when nil: %+v", input)
+			if err := RequestItem(context.Background(), client, tc.item, "silo"); err != nil {
+				t.Fatalf("RequestItem: %v", err)
+			}
+			if len(stub.calls) != 1 {
+				t.Fatalf("want 1 request, got %d", len(stub.calls))
+			}
+			call := stub.calls[0]
+			if !strings.Contains(call.Query, "requestItem(") {
+				t.Fatalf("want the requestItem mutation, got query: %s", call.Query)
+			}
+			if want := map[string]any{"input": tc.wantInput}; !reflect.DeepEqual(call.Variables, want) {
+				t.Fatalf("variables: want %v, got %v", want, call.Variables)
+			}
+		})
 	}
 }
 
-func TestRequestMovieConflict(t *testing.T) {
-	_, client := newStub(t, `{"data":{"requestMovie":{"success":false,"message":"A request for this movie already exists.","item":null}}}`)
+func TestRequestItemSurfacesGraphQLError(t *testing.T) {
+	_, client := newStub(t, unauthenticated)
 
-	tmdb := "42"
-	outcome, err := RequestMovie(context.Background(), client, "Arrival", nil, &tmdb, nil)
-	if err != nil {
-		t.Fatalf("RequestMovie: %v", err)
-	}
-	if !outcome.Conflict || outcome.Success {
-		t.Fatalf("want conflict outcome, got %+v", outcome)
+	err := RequestItem(context.Background(), client, Item{Type: Movie, ID: "42"}, "silo")
+	if err == nil || !strings.Contains(err.Error(), "Access denied") {
+		t.Fatalf("want riven's error message, got %v", err)
 	}
 }
 
-func TestRequestShowIncludesSeasonsField(t *testing.T) {
-	stub, client := newStub(t, `{"data":{"requestShow":{"success":true,"message":"Show request created successfully.","item":{"state":"REQUESTED"}}}}`)
+func TestItemStatus(t *testing.T) {
+	cases := []struct {
+		name     string
+		item     Item
+		response string
+		wantVars map[string]any
+		want     ItemState
+	}{
+		{
+			name:     "movie with a media item",
+			item:     Item{Type: Movie, ID: "42"},
+			response: `{"data":{"itemRequestByExternalIds":{"state":"completed","primaryMediaItem":{"state":"downloaded"}}}}`,
+			wantVars: map[string]any{"tmdbId": "42"},
+			want:     ItemState{Request: "completed", Media: "downloaded"},
+		},
+		{
+			name:     "show before indexing",
+			item:     Item{Type: Show, ID: "99"},
+			response: `{"data":{"itemRequestByExternalIds":{"state":"requested","primaryMediaItem":null}}}`,
+			wantVars: map[string]any{"tvdbId": "99"},
+			want:     ItemState{Request: "requested"},
+		},
+		{
+			name:     "no request",
+			item:     Item{Type: Movie, ID: "42"},
+			response: `{"data":{"itemRequestByExternalIds":null}}`,
+			wantVars: map[string]any{"tmdbId": "42"},
+			want:     ItemState{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub, client := newStub(t, tc.response)
 
-	tvdb := "99"
-	outcome, err := RequestShow(context.Background(), client, "Severance", nil, &tvdb, nil)
-	if err != nil {
-		t.Fatalf("RequestShow: %v", err)
-	}
-	if !outcome.Success {
-		t.Fatalf("bad outcome: %+v", outcome)
-	}
-	if !strings.Contains(stub.bodies[0].Query, "requestShow") {
-		t.Fatalf("expected requestShow mutation, got query: %s", stub.bodies[0].Query)
+			got, err := ItemStatus(context.Background(), client, tc.item)
+			if err != nil {
+				t.Fatalf("ItemStatus: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("state: want %+v, got %+v", tc.want, got)
+			}
+			call := stub.calls[0]
+			if !strings.Contains(call.Query, "itemRequestByExternalIds(") {
+				t.Fatalf("want the itemRequestByExternalIds query, got: %s", call.Query)
+			}
+			if !reflect.DeepEqual(call.Variables, tc.wantVars) {
+				t.Fatalf("variables: want %v, got %v", tc.wantVars, call.Variables)
+			}
+		})
 	}
 }
 
-func TestGraphQLErrorSurfaces(t *testing.T) {
-	_, client := newStub(t, `{"errors":[{"message":"Forbidden"}]}`)
+func TestItemStatusSurfacesGraphQLError(t *testing.T) {
+	_, client := newStub(t, unauthenticated)
 
-	tmdb := "1"
-	_, err := RequestMovie(context.Background(), client, "X", nil, &tmdb, nil)
-	if err == nil || !strings.Contains(err.Error(), "Forbidden") {
-		t.Fatalf("want Forbidden error, got %v", err)
+	if _, err := ItemStatus(context.Background(), client, Item{Type: Show, ID: "99"}); err == nil {
+		t.Fatal("want an error for an errors response")
 	}
 }
 
-func TestMediaItemStateFound(t *testing.T) {
-	_, client := newStub(t, `{"data":{"mediaItemByTmdb":{"state":"Completed"}}}`)
-
-	state, err := MediaItemState(context.Background(), client, "tmdb", "42")
-	if err != nil {
-		t.Fatalf("MediaItemState: %v", err)
-	}
-	if state != "Completed" {
-		t.Fatalf("want Completed, got %q", state)
-	}
-}
-
-func TestMediaItemStateNotFound(t *testing.T) {
-	_, client := newStub(t, `{"data":{"mediaItemByTvdb":null}}`)
-
-	state, err := MediaItemState(context.Background(), client, "tvdb", "99")
-	if err != nil {
-		t.Fatalf("MediaItemState: %v", err)
-	}
-	if state != "" {
-		t.Fatalf("want empty state, got %q", state)
-	}
-}
-
-func TestPingSuccess(t *testing.T) {
-	_, client := newStub(t, `{"data":{"__typename":"Query"}}`)
+func TestPing(t *testing.T) {
+	_, client := newStub(t, `{"data":{"instanceStatus":{"restartRequired":false}}}`)
 	if err := Ping(context.Background(), client); err != nil {
 		t.Fatalf("Ping: %v", err)
 	}
-}
 
-func TestPingUnauthorized(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	client := httpclient.New(srv.URL, "bad-key", nil)
+	_, client = newStub(t, unauthenticated)
 	if err := Ping(context.Background(), client); err == nil {
-		t.Fatal("want error for unauthorized ping")
+		t.Fatal("want an error when riven rejects the key")
 	}
 }

@@ -1,5 +1,3 @@
-// Command silo-plugins-requests-riven implements the Silo request_router.v1
-// capability backed directly by a riven-rs instance's GraphQL API.
 package main
 
 import (
