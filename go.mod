@@ -1,4 +1,4 @@
-module github.com/olivertgwalton/silo-plugins-request-riven
+module github.com/evo-de/silo-plugins-request-riven
 
 go 1.26.3
 
