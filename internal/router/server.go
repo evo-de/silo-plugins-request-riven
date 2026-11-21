@@ -99,7 +99,7 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	var targets []*pluginv1.FulfillmentTarget
 	for _, c := range req.GetConnections() {
 		conn := connectionFromRouter(c)
-		client := httpclient.New(conn.BaseURL, conn.APIKey, nil)
+		client := riven.NewClient(conn.BaseURL, conn.APIKey)
 		status, externalStatus, message := s.submitOne(ctx, client, isSeries, d.GetTitle(), imdbID, other)
 		for _, q := range qualities {
 			targets = append(targets, &pluginv1.FulfillmentTarget{
@@ -154,7 +154,7 @@ func (s *Server) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusReque
 	byID := make(map[string]*httpclient.Client, len(req.GetConnections()))
 	for _, c := range req.GetConnections() {
 		conn := connectionFromRouter(c)
-		byID[conn.ID] = httpclient.New(conn.BaseURL, conn.APIKey, nil)
+		byID[conn.ID] = riven.NewClient(conn.BaseURL, conn.APIKey)
 	}
 
 	var statuses []*pluginv1.TargetStatus
@@ -197,7 +197,7 @@ func mapState(state string) string {
 // Never returns a gRPC error; failure is Ok:false + message.
 func (s *Server) TestConnection(ctx context.Context, req *pluginv1.TestConnectionRequest) (*pluginv1.TestConnectionResponse, error) {
 	conn := connectionFromRouter(req.GetConnection())
-	if err := riven.Ping(ctx, httpclient.New(conn.BaseURL, conn.APIKey, nil)); err != nil {
+	if err := riven.Ping(ctx, riven.NewClient(conn.BaseURL, conn.APIKey)); err != nil {
 		return &pluginv1.TestConnectionResponse{Ok: false, Message: err.Error()}, nil
 	}
 	return &pluginv1.TestConnectionResponse{Ok: true, Message: "connection successful"}, nil

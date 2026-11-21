@@ -9,11 +9,32 @@ package riven
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
 )
 
 const graphQLPath = "/graphql"
+
+// NewClient returns an SDK client that authenticates to riven. The SDK only
+// sends the key as X-Api-Key, which riven-ts ignores, so the transport adds
+// the Authorization header riven-ts reads.
+func NewClient(baseURL, apiKey string) *httpclient.Client {
+	return httpclient.New(baseURL, apiKey, &http.Client{
+		// Keep the SDK's default timeout, which a custom http.Client replaces.
+		Timeout:   2 * time.Minute,
+		Transport: bearerTransport(apiKey),
+	})
+}
+
+type bearerTransport string
+
+func (key bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+string(key))
+	return http.DefaultTransport.RoundTrip(r)
+}
 
 type gqlRequest struct {
 	Query     string `json:"query"`

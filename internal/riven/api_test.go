@@ -50,6 +50,23 @@ func newStub(t *testing.T, responses ...string) (*gqlStub, *httpclient.Client) {
 	return stub, httpclient.New(srv.URL, "k", nil)
 }
 
+func TestNewClientSendsBearerToken(t *testing.T) {
+	auth := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	if err := Ping(context.Background(), NewClient(srv.URL, "riven-key")); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if got := <-auth; got != "Bearer riven-key" {
+		t.Fatalf("Authorization: want %q, got %q", "Bearer riven-key", got)
+	}
+}
+
 func TestRequestMovieSuccess(t *testing.T) {
 	stub, client := newStub(t, `{"data":{"requestMovie":{"success":true,"message":"Movie request created successfully.","item":{"state":"REQUESTED"}}}}`)
 
