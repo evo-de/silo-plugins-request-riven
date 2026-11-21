@@ -5,10 +5,10 @@
   "silo_api_version": "v1",
   "presentation": {
     "display_name": "Riven Requests",
-    "summary": "Submit Silo movie and series requests directly to a riven-rs instance.",
-    "description_markdown": "Connects Silo to [riven-rs](https://github.com/rivenmedia/riven-rs) using its native GraphQL request API (`requestMovie` / `requestShow`), so requests can be fulfilled without routing through Seerr. Riven tracks and scrapes the request itself; the plugin only submits it and reports back status derived from the resulting media item's state.",
-    "setup_markdown": "Install the plugin and add a Riven connection in Silo with the riven-rs API base URL and the value of `RIVEN_SETTING__API_KEY` configured on that instance. If Silo and riven-rs run in separate Docker Compose projects, `http://localhost:PORT` will not reach riven-rs from inside Silo's container \u2014 use `http://host.docker.internal:PORT` (or join both containers to a shared Docker network) instead. Requests are submitted under a trusted service identity; riven has no per-user approval queue, so every request is accepted immediately and left for riven's own indexing/scraping pipeline to fulfill.",
-    "homepage_url": "https://github.com/rivenmedia/riven-rs",
+    "summary": "Submit Silo movie and series requests directly to a riven-ts instance.",
+    "description_markdown": "Connects Silo to [riven-ts](https://github.com/rivenmedia/riven-ts) through its GraphQL `requestItem` API, so requests are fulfilled without Seerr. riven-ts finds and downloads the item itself. The plugin submits the request and reports status from the request's primary media item. Movies need a TMDB id and series need a TVDB id. riven-ts reports nothing back about duplicates or rejections, so a request that riven-ts drops stays queued.",
+    "setup_markdown": "Set `RIVEN_SETTING__apiKey` on riven-ts to a key of at least 32 characters. If it is unset, riven-ts generates a new key on every start. Add a Riven connection in Silo with riven-ts's base URL and that key. The plugin sends the key as `Authorization: Bearer`. riven-ts listens on port 3000 by default, and on localhost only unless you set `RIVEN_SETTING__host=0.0.0.0`. If Silo and riven-ts run in separate Docker Compose projects, use `http://host.docker.internal:3000` or a shared Docker network instead of `http://localhost:3000`. riven-ts scans finished downloads into Silo through its own Silo plugin, `@repo/plugin-silo`, not through this plugin.",
+    "homepage_url": "https://github.com/rivenmedia/riven-ts",
     "source_url": "https://github.com/olivertgwalton/silo-plugins-request-riven",
     "support_url": "https://github.com/olivertgwalton/silo-plugins-request-riven/issues",
     "changelog_url": "https://github.com/olivertgwalton/silo-plugins-request-riven/releases",
@@ -36,7 +36,7 @@
       "type": "request_router.v1",
       "id": "riven",
       "display_name": "Riven",
-      "description": "Fulfill content requests directly against a riven-rs instance's GraphQL API.",
+      "description": "Fulfill content requests directly against a riven-ts instance's GraphQL API.",
       "config_schema": [
         {
           "key": "connection",
