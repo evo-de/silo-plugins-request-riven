@@ -1,19 +1,19 @@
 {
   "plugin_id": "silo.requests.riven",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "checksum": "__CHECKSUM__",
   "silo_api_version": "v1",
   "presentation": {
     "display_name": "Riven Requests",
     "summary": "Submit Silo movie and series requests directly to a riven-ts instance.",
     "description_markdown": "Connects Silo to [riven-ts](https://github.com/rivenmedia/riven-ts) through its GraphQL `requestItem` API, so requests are fulfilled without Seerr. riven-ts finds and downloads the item itself. The plugin submits the request and reports status from the request's primary media item. Movies need a TMDB id and series need a TVDB id. riven-ts reports nothing back about duplicates or rejections, so a request that riven-ts drops stays queued.",
-    "setup_markdown": "Set `RIVEN_SETTING__apiKey` on riven-ts to a key of at least 32 characters. If it is unset, riven-ts generates a new key on every start. Add a Riven connection in Silo with riven-ts's base URL and that key. The plugin sends the key as `Authorization: Bearer`. riven-ts listens on port 3000 by default, and on localhost only unless you set `RIVEN_SETTING__host=0.0.0.0`. If Silo and riven-ts run in separate Docker Compose projects, use `http://host.docker.internal:3000` or a shared Docker network instead of `http://localhost:3000`. riven-ts scans finished downloads into Silo through its own Silo plugin, `@repo/plugin-silo`, not through this plugin.",
+    "setup_markdown": "Set `RIVEN_SETTING__apiKey` on riven-ts to a key of at least 32 characters. If it is unset, riven-ts generates a new key on every start. In Silo, add a Riven request server with riven-ts's base URL and that key, then route movies and series to it in request routing. The plugin sends the key as `Authorization: Bearer`. riven-ts listens on port 3000 by default, and on localhost only unless you set `RIVEN_SETTING__host=0.0.0.0`. If Silo and riven-ts run in separate Docker Compose projects, use `http://host.docker.internal:3000` or a shared Docker network instead of `http://localhost:3000`. riven-ts scans finished downloads into Silo through its own Silo plugin, `@repo/plugin-silo`, not through this plugin.",
     "homepage_url": "https://github.com/rivenmedia/riven-ts",
-    "source_url": "https://github.com/olivertgwalton/silo-plugins-request-riven",
-    "support_url": "https://github.com/olivertgwalton/silo-plugins-request-riven/issues",
-    "changelog_url": "https://github.com/olivertgwalton/silo-plugins-request-riven/releases",
-    "publisher_name": "olivertgwalton",
-    "publisher_url": "https://github.com/olivertgwalton",
+    "source_url": "https://github.com/evo-de/silo-plugins-request-riven",
+    "support_url": "https://github.com/evo-de/silo-plugins-request-riven/issues",
+    "changelog_url": "https://github.com/evo-de/silo-plugins-request-riven/releases",
+    "publisher_name": "evo-de",
+    "publisher_url": "https://github.com/evo-de",
     "license_spdx": "AGPL-3.0-only"
   },
   "supported_platforms": [
