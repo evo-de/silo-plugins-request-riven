@@ -73,7 +73,8 @@ Docker network.
 ## How requests map
 
 - The plugin submits each request with riven-ts's `requestItem` mutation.
-  A series request asks for every non-special season.
+  A series request asks for the seasons Silo names, or for every season but
+  Specials when it names none. See [Seasons](#seasons).
 - A movie needs a TMDB id and a series needs a TVDB id, because riven-ts tracks
   items by those ids. Silo fails a request that lacks the right id, even when
   it has an IMDb id. riven-ts accepts an IMDb-only request but fails it later.
@@ -84,6 +85,35 @@ Docker network.
 - riven-ts reports nothing back about duplicates or rejections. It answers
   `requestItem` before it processes the request, so a request that riven-ts
   drops stays `queued` in Silo.
+
+## Seasons
+
+A series request in Silo can name seasons. The plugin passes them to riven-ts
+as `requestedSeasons`, and riven-ts fetches only those seasons. When riven-ts
+already tracks some seasons of the show, it adds the new ones to its list.
+Asking again for seasons riven-ts already tracks changes nothing.
+
+There are two exceptions.
+
+- If riven-ts already tracks the whole show, the plugin sends nothing, and the
+  request shows "riven already tracks every season". riven-ts rebuilds its
+  tracked seasons from the request's season list each time it indexes the
+  show, so a list would drop every other season.
+- riven-ts leaves Specials (season 0) out of a whole-show request. A request
+  for the Specials of such a show fails, because adding them would drop the
+  other seasons.
+
+Season numbers come from Silo, which numbers seasons like TMDB. riven-ts
+numbers them like TVDB. The two agree for most series. For a series they
+number differently, such as some anime, riven-ts fetches the season with the
+same number.
+
+A request for the whole series changes nothing when riven-ts tracks some
+seasons of the show. riven-ts keeps its season list and cannot widen it to the
+whole show.
+
+Silo cannot request single episodes, and riven-ts's `requestItem` takes only
+seasons, so the plugin requests whole seasons.
 
 ## How status maps
 
@@ -101,6 +131,12 @@ as it indexes the movie.
 | Media `failed` or `paused` | `failed` |
 | Media `scraped`, `downloaded`, or `partially_completed` | `downloading` |
 | Media `indexed`, `unreleased`, or any other state | `queued` |
+
+For a request that names seasons, the plugin reads the state of those seasons
+instead of the whole show. Seasons that all share a state give that state.
+Otherwise any finished season gives `partially_completed`, any season in
+progress gives `scraped`, and the rest give `indexed`. A season riven-ts does
+not track yet counts as not started.
 
 Silo shows the media item's state as the external status. Before riven-ts
 indexes the item, it shows the request's state.
