@@ -58,8 +58,10 @@ no other settings.
    `RIVEN_SETTING__apiKey`.
 4. Route movies and series to the Riven server in Silo's request routing.
    Silo refuses Standard routing while a media type has more than one server
-   of the same kind. Disable any other request server for those media types,
-   or switch to Advanced routing.
+   of the same kind. If another request server, such as Seerr, also takes
+   series, set its media types to movies only, or disable it. Advanced routing
+   accepts the second server, but it can block season requests. See
+   [Seasons](#seasons).
 
 The plugin sends the key as `Authorization: Bearer <key>`. **Test connection**
 reads a field that riven-ts answers only for a valid key, so a wrong key fails
@@ -94,6 +96,14 @@ already tracks some seasons of the show, it adds the new ones to its list.
 Asking again for seasons riven-ts already tracks changes nothing. Once the list
 covers every season but Specials, riven-ts turns it into a whole-show request
 when it next indexes the show, so it also fetches seasons that air later.
+
+Silo offers the missing seasons of a series it already has only while every
+enabled request server that takes series can request single seasons. Seerr's
+plugin cannot, as of version 0.2.3. While a Seerr server also takes series,
+Silo shows such a series as already available and offers no more seasons, even
+when every routing rule sends series to Riven. To fix it, set the Seerr
+server's media types to movies only, or disable it. Silo reports the setting
+as `missing_seasons_requestable` in `GET /api/v2/requests/status`.
 
 There are two exceptions.
 
