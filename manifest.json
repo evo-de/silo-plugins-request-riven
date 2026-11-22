@@ -44,10 +44,19 @@
         {
           "key": "connection",
           "title": "Riven",
-          "json_schema": "{\"type\":\"object\",\"properties\":{}}",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"tmdb_api_key\":{\"type\":\"string\"}}}",
           "admin_form": {
             "submit_label": "Save connection",
-            "fields": []
+            "fields": [
+              {
+                "key": "tmdb_api_key",
+                "label": "TMDB API key",
+                "description": "Optional. A TMDB API key or API Read Access Token. When Silo sends no air dates for a season request, the plugin reads them from TMDB to find the matching riven-ts season.",
+                "control": "ADMIN_FORM_CONTROL_PASSWORD",
+                "required": false,
+                "secret": true
+              }
+            ]
           }
         }
       ]

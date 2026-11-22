@@ -12,6 +12,7 @@ import (
 	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/evo-de/silo-plugins-request-riven/internal/riven"
 )
@@ -498,21 +499,28 @@ func TestRivenSeasonsMatchesByAirDate(t *testing.T) {
 	}
 }
 
-// splitShow answers riven-ts's TVDB lookup for a show that riven-ts splits
-// into two 12-episode seasons, while Silo counts one 24-episode season.
-func splitShow() map[string]string {
-	season := func(start string) string {
+// tvdbShow answers riven-ts's TVDB lookup for a show with one 12-episode
+// weekly season per start date, numbered from 1.
+func tvdbShow(starts ...string) map[string]string {
+	var numbers, seasons []string
+	for i, start := range starts {
 		var eps []string
 		for _, e := range weekly(1, 12, start) {
 			eps = append(eps, `{"number":`+strconv.Itoa(int(e.Number))+`,"airDate":"`+e.AirDate+`T00:00:00.000Z"}`)
 		}
-		return `{"episodes":[` + strings.Join(eps, ",") + `]}`
+		n := strconv.Itoa(i + 1)
+		numbers = append(numbers, `{"number":`+n+`}`)
+		seasons = append(seasons, `"s`+n+`":{"episodes":[`+strings.Join(eps, ",")+`]}`)
 	}
 	return map[string]string{
-		"seasons { number }": `{"data":{"tmdbItem":{"seasons":[{"number":1},{"number":2}]}}}`,
-		"season(number:":     `{"data":{"tmdbItem":{"s1":` + season("2024-01-07") + `,"s2":` + season("2024-07-07") + `}}}`,
+		"seasons { number }": `{"data":{"tmdbItem":{"seasons":[` + strings.Join(numbers, ",") + `]}}}`,
+		"season(number:":     `{"data":{"tmdbItem":{` + strings.Join(seasons, ",") + `}}}`,
 	}
 }
+
+// splitShow answers riven-ts's TVDB lookup for a show that riven-ts splits
+// into two 12-episode seasons, while Silo counts one 24-episode season.
+func splitShow() map[string]string { return tvdbShow("2024-01-07", "2024-07-07") }
 
 var oneLongSeason = []*pluginv1.RequestedSeason{{Number: 1, FirstAirDate: "2024-01-07", EpisodeCount: 24}}
 
@@ -583,5 +591,162 @@ func TestCheckStatusReadsTheSeasonsTheAirDatesMatch(t *testing.T) {
 	// Silo's season 1 is riven-ts's seasons 1 and 2, and only the first is done.
 	if st := resp.GetStatuses()[0]; st.GetStatus() != "downloading" || st.GetExternalStatus() != "partially_completed" {
 		t.Fatalf("want downloading/partially_completed, got %+v", st)
+	}
+}
+
+// renumberedShow answers riven-ts's TVDB lookup for a show that TVDB splits
+// into three seasons. TMDB counts TVDB's first two as its season 1, and TVDB's
+// third as its season 2, the way it numbers Bleach.
+func renumberedShow() map[string]string {
+	return tvdbShow("2004-01-04", "2004-04-04", "2022-10-09")
+}
+
+const renumberedTMDB = `{"id":30984,"seasons":[
+	{"air_date":null,"episode_count":3,"season_number":0},
+	{"air_date":"2004-01-04","episode_count":24,"season_number":1},
+	{"air_date":"2022-10-09","episode_count":12,"season_number":2}
+]}`
+
+// startFakeTMDB answers every request with status and body, and records the
+// path of each request.
+func startFakeTMDB(t *testing.T, status int, body string) (*httptest.Server, *[]string) {
+	t.Helper()
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &paths
+}
+
+func tmdbConn(t *testing.T, id, baseURL, tmdbKey string) *pluginv1.RouterConnection {
+	t.Helper()
+	c := routerConn(id, baseURL)
+	config, err := structpb.NewStruct(map[string]any{"tmdb_api_key": tmdbKey})
+	if err != nil {
+		t.Fatalf("connection config: %v", err)
+	}
+	c.Config = config
+	return c
+}
+
+func TestFulfillReadsMissingAirDatesFromTMDB(t *testing.T) {
+	both := map[string]string{"tvdb": "74796", "tmdb": "30984"}
+	cases := []struct {
+		name          string
+		tmdbKey       string
+		ids           map[string]string
+		details       []*pluginv1.RequestedSeason
+		wantSeasons   []any
+		wantTMDBPaths []string
+	}{
+		{
+			name:          "TMDB numbers the season differently",
+			tmdbKey:       "tmdb-key",
+			ids:           both,
+			wantSeasons:   []any{3.0},
+			wantTMDBPaths: []string{"/tv/30984"},
+		},
+		{
+			name:        "Silo sent air dates",
+			tmdbKey:     "tmdb-key",
+			ids:         both,
+			details:     []*pluginv1.RequestedSeason{{Number: 2, FirstAirDate: "2004-01-04", EpisodeCount: 24}},
+			wantSeasons: []any{1.0, 2.0},
+		},
+		{
+			name:        "no TMDB key",
+			ids:         both,
+			wantSeasons: []any{2.0},
+		},
+		{
+			name:        "no TMDB id",
+			tmdbKey:     "tmdb-key",
+			ids:         map[string]string{"tvdb": "74796"},
+			wantSeasons: []any{2.0},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stubs := renumberedShow()
+			stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":null}}`
+			stubs["requestItem("] = `{"data":{"requestItem":true}}`
+			srv, f := startFakeRiven(t, stubs)
+			tmdbSrv, tmdbPaths := startFakeTMDB(t, http.StatusOK, renumberedTMDB)
+
+			resp, err := (&Server{tmdbURL: tmdbSrv.URL}).Fulfill(context.Background(), &pluginv1.FulfillRequest{
+				Request: &pluginv1.RequestDescriptor{
+					MediaType: "series", ExternalIds: tc.ids,
+					Seasons: []int32{2}, SeasonDetails: tc.details,
+				},
+				Connections: []*pluginv1.RouterConnection{tmdbConn(t, "c1", srv.URL, tc.tmdbKey)},
+			})
+			if err != nil {
+				t.Fatalf("Fulfill: %v", err)
+			}
+			if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "queued" {
+				t.Fatalf("want a queued target, got %+v", tgt)
+			}
+			last := f.received[len(f.received)-1]
+			if got := last.Variables["input"].(map[string]any)["requestedSeasons"]; !reflect.DeepEqual(got, tc.wantSeasons) {
+				t.Fatalf("riven was asked for seasons %v, want %v", got, tc.wantSeasons)
+			}
+			if !reflect.DeepEqual(*tmdbPaths, tc.wantTMDBPaths) {
+				t.Fatalf("TMDB received %v, want %v", *tmdbPaths, tc.wantTMDBPaths)
+			}
+		})
+	}
+}
+
+func TestFulfillFailsWhenTMDBFails(t *testing.T) {
+	stubs := renumberedShow()
+	stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":null}}`
+	stubs["requestItem("] = `{"data":{"requestItem":true}}`
+	srv, f := startFakeRiven(t, stubs)
+	tmdbSrv, _ := startFakeTMDB(t, http.StatusUnauthorized, `{"status_code":7,"status_message":"Invalid API key: You must be granted a valid key.","success":false}`)
+
+	resp, err := (&Server{tmdbURL: tmdbSrv.URL}).Fulfill(context.Background(), &pluginv1.FulfillRequest{
+		Request: &pluginv1.RequestDescriptor{
+			MediaType: "series", ExternalIds: map[string]string{"tvdb": "74796", "tmdb": "30984"},
+			Seasons: []int32{2},
+		},
+		Connections: []*pluginv1.RouterConnection{tmdbConn(t, "c1", srv.URL, "tmdb-key")},
+	})
+	if err != nil {
+		t.Fatalf("Fulfill: %v", err)
+	}
+	if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "failed" || !strings.Contains(tgt.GetMessage(), "401") {
+		t.Fatalf("want a failed target naming TMDB's status, got %+v", tgt)
+	}
+	for _, call := range f.received {
+		if strings.Contains(call.Query, "requestItem(") {
+			t.Fatal("want no request when the TMDB lookup fails")
+		}
+	}
+}
+
+func TestCheckStatusReadsTheSeasonTMDBDatesMatch(t *testing.T) {
+	stubs := renumberedShow()
+	stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":{"state":"processing","seasons":[2,3],"primaryMediaItem":{"state":"partially_completed","seasons":[{"number":1,"state":"completed"},{"number":2,"state":"completed"},{"number":3,"state":"scraped"}]}}}}`
+	srv, _ := startFakeRiven(t, stubs)
+	tmdbSrv, _ := startFakeTMDB(t, http.StatusOK, renumberedTMDB)
+
+	resp, err := (&Server{tmdbURL: tmdbSrv.URL}).CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
+		Request: &pluginv1.RequestDescriptor{
+			MediaType: "series", ExternalIds: map[string]string{"tvdb": "74796", "tmdb": "30984"},
+			Seasons: []int32{2},
+		},
+		Targets:     []*pluginv1.TargetRef{{Quality: "1080p", ConnectionId: "c1", ExternalId: "74796"}},
+		Connections: []*pluginv1.RouterConnection{tmdbConn(t, "c1", srv.URL, "tmdb-key")},
+	})
+	if err != nil {
+		t.Fatalf("CheckStatus: %v", err)
+	}
+	// Silo's season 2 is riven-ts's season 3, which is still downloading.
+	if st := resp.GetStatuses()[0]; st.GetStatus() != "downloading" || st.GetExternalStatus() != "scraped" {
+		t.Fatalf("want downloading/scraped, got %+v", st)
 	}
 }

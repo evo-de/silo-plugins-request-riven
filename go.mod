@@ -2,7 +2,10 @@ module github.com/evo-de/silo-plugins-request-riven
 
 go 1.26.3
 
-require github.com/Silo-Server/silo-plugin-sdk v0.35.0
+require (
+	github.com/Silo-Server/silo-plugin-sdk v0.35.0
+	google.golang.org/protobuf v1.36.11
+)
 
 require (
 	github.com/fatih/color v1.13.0 // indirect
@@ -19,5 +22,4 @@ require (
 	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc v1.83.2 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 )

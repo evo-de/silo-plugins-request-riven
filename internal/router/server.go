@@ -11,15 +11,17 @@ import (
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
 
 	"github.com/evo-de/silo-plugins-request-riven/internal/riven"
+	"github.com/evo-de/silo-plugins-request-riven/internal/tmdb"
 )
 
 // Server implements the request_router.v1 RPCs. It is stateless.
 type Server struct {
 	pluginv1.UnimplementedRequestRouterServer
+	tmdbURL string
 }
 
 // New returns a ready-to-serve request router.
-func New() *Server { return &Server{} }
+func New() *Server { return &Server{tmdbURL: tmdb.BaseURL} }
 
 const requestedBySilo = "silo"
 
@@ -56,7 +58,7 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	for _, c := range req.GetConnections() {
 		conn := connectionFromRouter(c)
 		status := "queued"
-		message, err := submit(ctx, riven.NewClient(conn.BaseURL, conn.APIKey), item, req.GetRequest().GetSeasonDetails())
+		message, err := s.submit(ctx, conn, item, req.GetRequest())
 		if err != nil {
 			status, message = "failed", err.Error()
 		}
@@ -78,9 +80,34 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	return &pluginv1.FulfillResponse{Targets: targets}, nil
 }
 
+// seasonDetails returns the first air date and episode count of each requested
+// season. Silo does not send them yet (Silo-Server/silo-server#4484), so when
+// the connection has a TMDB key, the plugin reads them from TMDB. Without a key
+// or a TMDB id it returns none, and the seasons keep their numbers.
+func (s *Server) seasonDetails(ctx context.Context, conn Connection, d *pluginv1.RequestDescriptor) ([]*pluginv1.RequestedSeason, error) {
+	if details := d.GetSeasonDetails(); len(details) > 0 {
+		return details, nil
+	}
+	showID := d.GetExternalIds()["tmdb"]
+	if d.GetMediaType() != "series" || len(d.GetSeasons()) == 0 || conn.TMDBKey == "" || showID == "" {
+		return nil, nil
+	}
+	seasons, err := tmdb.Seasons(ctx, s.tmdbURL, conn.TMDBKey, showID)
+	if err != nil {
+		return nil, err
+	}
+	var details []*pluginv1.RequestedSeason
+	for _, season := range seasons {
+		if slices.Contains(d.GetSeasons(), season.Number) {
+			details = append(details, &pluginv1.RequestedSeason{Number: season.Number, FirstAirDate: season.AirDate, EpisodeCount: season.EpisodeCount})
+		}
+	}
+	return details, nil
+}
+
 // resolveSeasons turns the item's seasons from Silo's numbers, which follow
 // TMDB, into riven-ts's, which follow TVDB. It looks up the show's episodes
-// only when Silo sent a season's first air date and episode count.
+// only when it has a season's first air date and episode count.
 func resolveSeasons(ctx context.Context, client *httpclient.Client, item riven.Item, details []*pluginv1.RequestedSeason) (riven.Item, error) {
 	if !slices.ContainsFunc(item.Seasons, func(number int32) bool { return usableDetail(details, number) != nil }) {
 		return item, nil
@@ -93,8 +120,8 @@ func resolveSeasons(ctx context.Context, client *httpclient.Client, item riven.I
 	return item, nil
 }
 
-// usableDetail returns the detail Silo sent for a regular season, or nil when
-// it sent none or one without a date or an episode count.
+// usableDetail returns the detail for a regular season, or nil when there is
+// none or it has no date or no episode count.
 func usableDetail(details []*pluginv1.RequestedSeason, number int32) *pluginv1.RequestedSeason {
 	if number == 0 {
 		return nil
@@ -143,8 +170,13 @@ func rivenSeasons(seasons []int32, details []*pluginv1.RequestedSeason, episodes
 // It does not send a request for some seasons of a show that riven-ts tracks as
 // a whole. riven-ts would replace the whole-show request with those seasons and
 // stop tracking the others when it next indexes the show.
-func submit(ctx context.Context, client *httpclient.Client, item riven.Item, details []*pluginv1.RequestedSeason) (string, error) {
-	item, err := resolveSeasons(ctx, client, item, details)
+func (s *Server) submit(ctx context.Context, conn Connection, item riven.Item, d *pluginv1.RequestDescriptor) (string, error) {
+	details, err := s.seasonDetails(ctx, conn, d)
+	if err != nil {
+		return "", err
+	}
+	client := riven.NewClient(conn.BaseURL, conn.APIKey)
+	item, err = resolveSeasons(ctx, client, item, details)
 	if err != nil {
 		return "", err
 	}
@@ -169,19 +201,24 @@ func (s *Server) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusReque
 		return &pluginv1.CheckStatusResponse{}, nil
 	}
 
-	byID := make(map[string]*httpclient.Client, len(req.GetConnections()))
+	byID := make(map[string]Connection, len(req.GetConnections()))
 	for _, c := range req.GetConnections() {
 		conn := connectionFromRouter(c)
-		byID[conn.ID] = riven.NewClient(conn.BaseURL, conn.APIKey)
+		byID[conn.ID] = conn
 	}
 
 	var statuses []*pluginv1.TargetStatus
 	for _, tref := range req.GetTargets() {
-		client, ok := byID[tref.GetConnectionId()]
+		conn, ok := byID[tref.GetConnectionId()]
 		if !ok {
 			continue
 		}
-		resolved, err := resolveSeasons(ctx, client, item, req.GetRequest().GetSeasonDetails())
+		details, err := s.seasonDetails(ctx, conn, req.GetRequest())
+		if err != nil {
+			continue
+		}
+		client := riven.NewClient(conn.BaseURL, conn.APIKey)
+		resolved, err := resolveSeasons(ctx, client, item, details)
 		if err != nil {
 			continue
 		}
@@ -268,8 +305,8 @@ func (s *Server) ListConfigOptions(ctx context.Context, req *pluginv1.ListConfig
 	return &pluginv1.ListConfigOptionsResponse{}, nil
 }
 
-// Validate has no cross-field rules to check: the connection config has no
-// fields at all. Returned empty so the host's save-time Validate succeeds.
+// Validate has no cross-field rules to check: the connection config has one
+// optional field. Returned empty so the host's save-time Validate succeeds.
 func (s *Server) Validate(ctx context.Context, req *pluginv1.ValidateRequest) (*pluginv1.ValidateResponse, error) {
 	return &pluginv1.ValidateResponse{}, nil
 }
