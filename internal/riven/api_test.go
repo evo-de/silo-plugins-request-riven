@@ -83,6 +83,16 @@ func TestRequestItemSendsOnlyTheItemsID(t *testing.T) {
 	}{
 		{"movie by TMDB", Item{Type: Movie, ID: "42"}, map[string]any{"type": "movie", "tmdbId": "42", "requestedBy": "silo"}},
 		{"show by TVDB", Item{Type: Show, ID: "99"}, map[string]any{"type": "show", "tvdbId": "99", "requestedBy": "silo"}},
+		{
+			"show seasons",
+			Item{Type: Show, ID: "99", Seasons: []int32{0, 2}},
+			map[string]any{"type": "show", "tvdbId": "99", "requestedBy": "silo", "requestedSeasons": []any{0.0, 2.0}},
+		},
+		{
+			"movie ignores seasons",
+			Item{Type: Movie, ID: "42", Seasons: []int32{1}},
+			map[string]any{"type": "movie", "tmdbId": "42", "requestedBy": "silo"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,6 +147,25 @@ func TestItemStatus(t *testing.T) {
 			want:     ItemState{Request: "requested"},
 		},
 		{
+			name:     "show requested by season",
+			item:     Item{Type: Show, ID: "99"},
+			response: `{"data":{"itemRequestByExternalIds":{"state":"processing","seasons":[1,2],"primaryMediaItem":{"state":"partially_completed","seasons":[{"number":0,"state":"indexed"},{"number":1,"state":"completed"},{"number":2,"state":"scraped"}]}}}}`,
+			wantVars: map[string]any{"tvdbId": "99"},
+			want: ItemState{
+				Request:        "processing",
+				Media:          "partially_completed",
+				RequestSeasons: []int32{1, 2},
+				Seasons:        map[int32]string{0: "indexed", 1: "completed", 2: "scraped"},
+			},
+		},
+		{
+			name:     "show requested whole",
+			item:     Item{Type: Show, ID: "99"},
+			response: `{"data":{"itemRequestByExternalIds":{"state":"ongoing","seasons":null,"primaryMediaItem":{"state":"completed","seasons":[{"number":1,"state":"completed"}]}}}}`,
+			wantVars: map[string]any{"tvdbId": "99"},
+			want:     ItemState{Request: "ongoing", Media: "completed", Seasons: map[int32]string{1: "completed"}},
+		},
+		{
 			name:     "no request",
 			item:     Item{Type: Movie, ID: "42"},
 			response: `{"data":{"itemRequestByExternalIds":null}}`,
@@ -152,7 +181,7 @@ func TestItemStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ItemStatus: %v", err)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("state: want %+v, got %+v", tc.want, got)
 			}
 			call := stub.calls[0]

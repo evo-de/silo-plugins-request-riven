@@ -39,6 +39,9 @@ const (
 type Item struct {
 	Type MediaType
 	ID   string
+	// Seasons lists the requested season numbers of a show. Empty means the
+	// whole show.
+	Seasons []int32
 }
 
 func (i Item) idField() string {
@@ -51,6 +54,11 @@ func (i Item) idField() string {
 type ItemState struct {
 	Request string
 	Media   string
+	// RequestSeasons is the request's season list. Nil means riven-ts
+	// tracks every season but Specials.
+	RequestSeasons []int32
+	// Seasons maps each season riven-ts has indexed to its state.
+	Seasons map[int32]string
 }
 
 type gqlRequest struct {
@@ -100,6 +108,9 @@ func RequestItem(ctx context.Context, client *httpclient.Client, item Item, requ
 		"requestedBy":  requestedBy,
 		item.idField(): item.ID,
 	}
+	if item.Type == Show && len(item.Seasons) > 0 {
+		input["requestedSeasons"] = item.Seasons
+	}
 	_, err := do[struct{}](ctx, client, requestItemMutation, map[string]any{"input": input})
 	return err
 }
@@ -110,9 +121,10 @@ const itemStatusQuery = `
 query($tmdbId: String, $tvdbId: String) {
   itemRequestByExternalIds(tmdbId: $tmdbId, tvdbId: $tvdbId) {
     state
+    seasons
     primaryMediaItem {
       ... on Movie { state }
-      ... on Show { state }
+      ... on Show { state seasons { number state } }
     }
   }
 }`
@@ -122,9 +134,14 @@ query($tmdbId: String, $tvdbId: String) {
 func ItemStatus(ctx context.Context, client *httpclient.Client, item Item) (ItemState, error) {
 	type data struct {
 		Request struct {
-			State            string `json:"state"`
+			State            string  `json:"state"`
+			Seasons          []int32 `json:"seasons"`
 			PrimaryMediaItem struct {
-				State string `json:"state"`
+				State   string `json:"state"`
+				Seasons []struct {
+					Number int32  `json:"number"`
+					State  string `json:"state"`
+				} `json:"seasons"`
 			} `json:"primaryMediaItem"`
 		} `json:"itemRequestByExternalIds"`
 	}
@@ -132,5 +149,16 @@ func ItemStatus(ctx context.Context, client *httpclient.Client, item Item) (Item
 	if err != nil {
 		return ItemState{}, err
 	}
-	return ItemState{Request: d.Request.State, Media: d.Request.PrimaryMediaItem.State}, nil
+	state := ItemState{
+		Request:        d.Request.State,
+		Media:          d.Request.PrimaryMediaItem.State,
+		RequestSeasons: d.Request.Seasons,
+	}
+	for _, season := range d.Request.PrimaryMediaItem.Seasons {
+		if state.Seasons == nil {
+			state.Seasons = make(map[int32]string)
+		}
+		state.Seasons[season.Number] = season.State
+	}
+	return state, nil
 }

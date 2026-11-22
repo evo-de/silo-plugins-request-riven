@@ -312,3 +312,135 @@ func TestTestConnection(t *testing.T) {
 		})
 	}
 }
+
+func TestFulfillRequestsOnlyTheSeasonsSiloAsksFor(t *testing.T) {
+	const noRequest = `{"data":{"itemRequestByExternalIds":null}}`
+	cases := []struct {
+		name         string
+		seasons      []int32
+		existing     string
+		wantStatus   string
+		wantMessage  string
+		wantRequests []any // requestedSeasons riven receives; nil means no requestItem call
+	}{
+		{
+			name:         "new show",
+			seasons:      []int32{2, 3},
+			existing:     noRequest,
+			wantStatus:   "queued",
+			wantMessage:  "requested in riven",
+			wantRequests: []any{2.0, 3.0},
+		},
+		{
+			name:         "show riven tracks by season",
+			seasons:      []int32{2, 3},
+			existing:     `{"data":{"itemRequestByExternalIds":{"state":"completed","seasons":[1],"primaryMediaItem":null}}}`,
+			wantStatus:   "queued",
+			wantMessage:  "requested in riven",
+			wantRequests: []any{2.0, 3.0},
+		},
+		{
+			name:        "show riven tracks whole",
+			seasons:     []int32{3},
+			existing:    `{"data":{"itemRequestByExternalIds":{"state":"ongoing","seasons":null,"primaryMediaItem":null}}}`,
+			wantStatus:  "queued",
+			wantMessage: "riven already tracks every season",
+		},
+		{
+			name:        "Specials of a show riven tracks whole",
+			seasons:     []int32{0, 3},
+			existing:    `{"data":{"itemRequestByExternalIds":{"state":"ongoing","seasons":null,"primaryMediaItem":null}}}`,
+			wantStatus:  "failed",
+			wantMessage: "cannot add Specials",
+		},
+		{
+			name:        "lookup rejected",
+			seasons:     []int32{3},
+			existing:    unauthenticated,
+			wantStatus:  "failed",
+			wantMessage: "Access denied",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, f := startFakeRiven(t, map[string]string{
+				"itemRequestByExternalIds": tc.existing,
+				"requestItem(":             `{"data":{"requestItem":true}}`,
+			})
+
+			resp, err := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
+				Request: &pluginv1.RequestDescriptor{
+					MediaType:   "series",
+					ExternalIds: map[string]string{"tvdb": "371980"},
+					Seasons:     tc.seasons,
+				},
+				Qualities:   []*pluginv1.RequestedQuality{{Id: "1080p"}},
+				Connections: []*pluginv1.RouterConnection{routerConn("c1", srv.URL)},
+			})
+			if err != nil {
+				t.Fatalf("Fulfill: %v", err)
+			}
+			if len(resp.GetTargets()) != 1 {
+				t.Fatalf("want 1 target, got %+v", resp)
+			}
+			tgt := resp.GetTargets()[0]
+			if tgt.GetStatus() != tc.wantStatus || !strings.Contains(tgt.GetMessage(), tc.wantMessage) {
+				t.Fatalf("want %s with %q, got %+v", tc.wantStatus, tc.wantMessage, tgt)
+			}
+
+			var sent []any
+			for _, call := range f.received {
+				if strings.Contains(call.Query, "requestItem(") {
+					sent = call.Variables["input"].(map[string]any)["requestedSeasons"].([]any)
+				}
+			}
+			if !reflect.DeepEqual(sent, tc.wantRequests) {
+				t.Fatalf("riven was asked for seasons %v, want %v", sent, tc.wantRequests)
+			}
+		})
+	}
+}
+
+func TestCheckStatusReadsTheRequestedSeasons(t *testing.T) {
+	const showSeasons = `[{"number":1,"state":"completed"},{"number":2,"state":"indexed"},{"number":3,"state":"scraped"},{"number":4,"state":"failed"}]`
+	cases := []struct {
+		name               string
+		seasons            []int32
+		request            string
+		wantStatus, wantES string
+	}{
+		{"whole show reads the show", nil, `{"state":"processing","primaryMediaItem":{"state":"completed","seasons":` + showSeasons + `}}`, "completed", "completed"},
+		{"finished season", []int32{1}, `{"state":"processing","primaryMediaItem":{"state":"partially_completed","seasons":` + showSeasons + `}}`, "completed", "completed"},
+		{"waiting season", []int32{2}, `{"state":"processing","primaryMediaItem":{"state":"partially_completed","seasons":` + showSeasons + `}}`, "queued", "indexed"},
+		{"season in progress", []int32{3}, `{"state":"processing","primaryMediaItem":{"state":"partially_completed","seasons":` + showSeasons + `}}`, "downloading", "scraped"},
+		{"failed season", []int32{4}, `{"state":"processing","primaryMediaItem":{"state":"partially_completed","seasons":` + showSeasons + `}}`, "failed", "failed"},
+		{"finished and waiting", []int32{1, 2}, `{"state":"processing","primaryMediaItem":{"state":"partially_completed","seasons":` + showSeasons + `}}`, "downloading", "partially_completed"},
+		{"in progress and waiting", []int32{2, 3}, `{"state":"processing","primaryMediaItem":{"state":"partially_completed","seasons":` + showSeasons + `}}`, "downloading", "scraped"},
+		{"failed and waiting", []int32{2, 4}, `{"state":"processing","primaryMediaItem":{"state":"partially_completed","seasons":` + showSeasons + `}}`, "queued", "indexed"},
+		{"season riven has not indexed", []int32{5}, `{"state":"ongoing","primaryMediaItem":{"state":"completed","seasons":` + showSeasons + `}}`, "queued", "ongoing"},
+		{"show not indexed yet", []int32{1}, `{"state":"requested","primaryMediaItem":null}`, "queued", "requested"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := startFakeRiven(t, map[string]string{
+				"itemRequestByExternalIds": `{"data":{"itemRequestByExternalIds":` + tc.request + `}}`,
+			})
+
+			resp, err := New().CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
+				Request:     &pluginv1.RequestDescriptor{MediaType: "series", ExternalIds: map[string]string{"tvdb": "99"}, Seasons: tc.seasons},
+				Targets:     []*pluginv1.TargetRef{{Quality: "1080p", ConnectionId: "c1", ExternalId: "99"}},
+				Connections: []*pluginv1.RouterConnection{routerConn("c1", srv.URL)},
+			})
+			if err != nil {
+				t.Fatalf("CheckStatus: %v", err)
+			}
+			if len(resp.GetStatuses()) != 1 {
+				t.Fatalf("want 1 status, got %d", len(resp.GetStatuses()))
+			}
+			st := resp.GetStatuses()[0]
+			if st.GetStatus() != tc.wantStatus || st.GetExternalStatus() != tc.wantES {
+				t.Fatalf("want %s/%q, got %+v", tc.wantStatus, tc.wantES, st)
+			}
+		})
+	}
+}

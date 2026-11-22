@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"slices"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
@@ -27,7 +28,7 @@ func rivenItem(d *pluginv1.RequestDescriptor) (riven.Item, error) {
 	ids := d.GetExternalIds()
 	if d.GetMediaType() == "series" {
 		if id := ids["tvdb"]; id != "" {
-			return riven.Item{Type: riven.Show, ID: id}, nil
+			return riven.Item{Type: riven.Show, ID: id, Seasons: d.GetSeasons()}, nil
 		}
 		return riven.Item{}, errors.New("request has no TVDB id; riven-ts tracks shows by TVDB id")
 	}
@@ -52,8 +53,9 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	var targets []*pluginv1.FulfillmentTarget
 	for _, c := range req.GetConnections() {
 		conn := connectionFromRouter(c)
-		status, message := "queued", "requested in riven"
-		if err := riven.RequestItem(ctx, riven.NewClient(conn.BaseURL, conn.APIKey), item, requestedBySilo); err != nil {
+		status := "queued"
+		message, err := submit(ctx, riven.NewClient(conn.BaseURL, conn.APIKey), item)
+		if err != nil {
 			status, message = "failed", err.Error()
 		}
 		// Silo marks a requested quality with no target as failed, so every
@@ -72,6 +74,26 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		return &pluginv1.FulfillResponse{Message: "no riven connection configured"}, nil
 	}
 	return &pluginv1.FulfillResponse{Targets: targets}, nil
+}
+
+// submit asks riven-ts for the item. It does not send a request for some
+// seasons of a show that riven-ts tracks as a whole. riven-ts would replace the
+// whole-show request with those seasons and stop tracking the others when it
+// next indexes the show.
+func submit(ctx context.Context, client *httpclient.Client, item riven.Item) (string, error) {
+	if item.Type == riven.Show && len(item.Seasons) > 0 {
+		state, err := riven.ItemStatus(ctx, client, item)
+		if err != nil {
+			return "", err
+		}
+		if state.Request != "" && state.RequestSeasons == nil {
+			if slices.Contains(item.Seasons, 0) {
+				return "", errors.New("riven-ts tracks every season of this series except Specials, and cannot add Specials without dropping the other seasons")
+			}
+			return "riven already tracks every season", nil
+		}
+	}
+	return "requested in riven", riven.RequestItem(ctx, client, item, requestedBySilo)
 }
 
 func (s *Server) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusRequest) (*pluginv1.CheckStatusResponse, error) {
@@ -96,6 +118,9 @@ func (s *Server) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusReque
 		if err != nil {
 			continue
 		}
+		if len(item.Seasons) > 0 && state.Seasons != nil {
+			state.Media = seasonsState(state.Seasons, item.Seasons)
+		}
 		status, externalStatus := mapState(state)
 		statuses = append(statuses, &pluginv1.TargetStatus{
 			Quality:        tref.GetQuality(),
@@ -114,6 +139,30 @@ var mediaStatuses = map[string]string{
 	"scraped":             "downloading",
 	"downloaded":          "downloading",
 	"partially_completed": "downloading",
+}
+
+// seasonsState summarises the requested seasons the way riven-ts summarises a
+// show from its requested seasons. Seasons that all share a state give that
+// state. Otherwise any finished season gives partially_completed, any season in
+// progress gives scraped, and the rest give indexed. A season riven-ts does not
+// track yet has no state.
+func seasonsState(seasons map[int32]string, requested []int32) string {
+	counts := make(map[string]int)
+	for _, number := range requested {
+		counts[seasons[number]]++
+	}
+	if len(counts) == 1 {
+		for state := range counts {
+			return state
+		}
+	}
+	switch {
+	case counts["completed"] > 0 || counts["partially_completed"] > 0:
+		return "partially_completed"
+	case counts["scraped"] > 0 || counts["downloaded"] > 0:
+		return "scraped"
+	}
+	return "indexed"
 }
 
 // mapState reads progress from the primary media item, not the request,
