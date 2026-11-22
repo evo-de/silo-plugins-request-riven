@@ -24,6 +24,11 @@ func TestEmbeddedManifestLoads(t *testing.T) {
 	if caps[0].GetType() != "request_router.v1" || caps[0].GetId() != "riven" {
 		t.Fatalf("capability[0]: want request_router.v1/riven got %q/%q", caps[0].GetType(), caps[0].GetId())
 	}
+	// Silo sends a series request's seasons, and asks for missing seasons of a
+	// series it already has, only when the plugin declares this.
+	if !caps[0].GetRequestRouter().GetSupportsSeasons() {
+		t.Fatal("request_router.supports_seasons: want true")
+	}
 }
 
 func TestIndexManifestMatchesManifest(t *testing.T) {
