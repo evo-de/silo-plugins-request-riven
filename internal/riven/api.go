@@ -57,7 +57,8 @@ type ItemState struct {
 	// RequestSeasons is the request's season list. Nil means riven-ts
 	// tracks every season but Specials.
 	RequestSeasons []int32
-	// Seasons maps each season riven-ts has indexed to its state.
+	// Seasons maps each season riven-ts tracks for the show to its state,
+	// once riven-ts has indexed the show.
 	Seasons map[int32]string
 }
 
@@ -116,7 +117,9 @@ func RequestItem(ctx context.Context, client *httpclient.Client, item Item, requ
 }
 
 // itemStatusQuery leaves out externalRequestId: riven-ts stores it as null
-// despite its String! type, and selecting it nulls the whole result.
+// despite its String! type, and selecting it nulls the whole result. A show's
+// seasons field lists only the seasons riven-ts tracks, and lists Specials
+// only when asked.
 const itemStatusQuery = `
 query($tmdbId: String, $tvdbId: String) {
   itemRequestByExternalIds(tmdbId: $tmdbId, tvdbId: $tvdbId) {
@@ -124,7 +127,7 @@ query($tmdbId: String, $tvdbId: String) {
     seasons
     primaryMediaItem {
       ... on Movie { state }
-      ... on Show { state seasons { number state } }
+      ... on Show { state seasons(includeSpecials: true) { number state } }
     }
   }
 }`

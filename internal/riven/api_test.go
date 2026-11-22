@@ -188,6 +188,10 @@ func TestItemStatus(t *testing.T) {
 			if !strings.Contains(call.Query, "itemRequestByExternalIds(") {
 				t.Fatalf("want the itemRequestByExternalIds query, got: %s", call.Query)
 			}
+			// riven-ts leaves Specials out of a show's seasons unless asked.
+			if !strings.Contains(call.Query, "seasons(includeSpecials: true)") {
+				t.Fatalf("want the show's seasons with Specials, got: %s", call.Query)
+			}
 			if !reflect.DeepEqual(call.Variables, tc.wantVars) {
 				t.Fatalf("variables: want %v, got %v", tc.wantVars, call.Variables)
 			}
