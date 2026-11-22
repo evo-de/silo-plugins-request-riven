@@ -8,6 +8,7 @@ type Connection struct {
 	ID      string
 	BaseURL string
 	APIKey  string
+	TMDBKey string
 }
 
 func connectionFromRouter(c *pluginv1.RouterConnection) Connection {
@@ -15,5 +16,6 @@ func connectionFromRouter(c *pluginv1.RouterConnection) Connection {
 		ID:      c.GetId(),
 		BaseURL: c.GetBaseUrl(),
 		APIKey:  c.GetApiKey(),
+		TMDBKey: c.GetConfig().GetFields()["tmdb_api_key"].GetStringValue(),
 	}
 }

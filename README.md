@@ -42,8 +42,8 @@ riven-rs plugin.
 
 ## Connect Silo to riven-ts
 
-Each Riven request server in Silo has a base URL and an API key. The plugin has
-no other settings.
+Each Riven request server in Silo has a base URL and an API key, and an
+optional TMDB API key that [Seasons](#seasons) describes.
 
 1. Set `RIVEN_SETTING__apiKey` on riven-ts to a key of at least 32 characters,
    for example the output of `openssl rand -hex 32`. If the setting is unset,
@@ -58,8 +58,10 @@ no other settings.
    `RIVEN_SETTING__apiKey`.
 4. Route movies and series to the Riven server in Silo's request routing.
    Silo refuses Standard routing while a media type has more than one server
-   of the same kind. Disable any other request server for those media types,
-   or switch to Advanced routing.
+   of the same kind. If another request server, such as Seerr, also takes
+   series, set its media types to movies only, or disable it. Advanced routing
+   accepts the second server, but it can block season requests. See
+   [Seasons](#seasons).
 
 The plugin sends the key as `Authorization: Bearer <key>`. **Test connection**
 reads a field that riven-ts answers only for a valid key, so a wrong key fails
@@ -73,7 +75,8 @@ Docker network.
 ## How requests map
 
 - The plugin submits each request with riven-ts's `requestItem` mutation.
-  A series request asks for every non-special season.
+  A series request asks for the seasons Silo names, or for every season but
+  Specials when it names none. See [Seasons](#seasons).
 - A movie needs a TMDB id and a series needs a TVDB id, because riven-ts tracks
   items by those ids. Silo fails a request that lacks the right id, even when
   it has an IMDb id. riven-ts accepts an IMDb-only request but fails it later.
@@ -84,6 +87,59 @@ Docker network.
 - riven-ts reports nothing back about duplicates or rejections. It answers
   `requestItem` before it processes the request, so a request that riven-ts
   drops stays `queued` in Silo.
+
+## Seasons
+
+A series request in Silo can name seasons. The plugin passes them to riven-ts
+as `requestedSeasons`, and riven-ts fetches only those seasons. When riven-ts
+already tracks some seasons of the show, it adds the new ones to its list.
+Asking again for seasons riven-ts already tracks changes nothing. Once the list
+covers every season but Specials, riven-ts turns it into a whole-show request
+when it next indexes the show, so it also fetches seasons that air later.
+
+Silo offers the missing seasons of a series it already has only while every
+enabled request server that takes series can request single seasons. Seerr's
+plugin cannot, as of version 0.2.3. While a Seerr server also takes series,
+Silo shows such a series as already available and offers no more seasons, even
+when every routing rule sends series to Riven. To fix it, set the Seerr
+server's media types to movies only, or disable it. Silo reports the setting
+as `missing_seasons_requestable` in `GET /api/v2/requests/status`.
+
+There are two exceptions.
+
+- If riven-ts already tracks the whole show, the plugin sends nothing, and the
+  request shows "riven already tracks every season". riven-ts rebuilds its
+  tracked seasons from the request's season list each time it indexes the
+  show, so a list would drop every other season.
+- riven-ts leaves Specials (season 0) out of a whole-show request. A request
+  for the Specials of such a show fails, because adding them would drop the
+  other seasons.
+
+Silo numbers seasons like TMDB, and riven-ts numbers them like TVDB. The two
+disagree for some series. Bleach, for example, has two seasons on TMDB and
+seventeen on TVDB. To match them, the plugin uses each requested season's first
+air date and episode count. It looks up the show's episodes through riven-ts's
+TVDB indexer, takes that many episodes airing from that date, and asks riven-ts
+for the seasons they belong to. Bleach's second TMDB season becomes TVDB season
+17. riven-ts fetches whole seasons, so when a TMDB season covers part of a TVDB
+season, riven-ts fetches all of that TVDB season. Specials, and a season
+without an air date or episode count, keep their number.
+
+Silo is meant to send the air dates and episode counts with the request, but
+current Silo builds do not yet (Silo-Server/silo-server#4484). Until they do,
+the plugin matches seasons by number unless the Riven request server has a TMDB
+API key. With a key, the plugin reads the air dates and episode counts from
+TMDB. Enter a TMDB API key or an API Read Access Token in the server's **TMDB
+API key** field. If the TMDB lookup fails, the request fails instead of going
+to the season with the same number. Silo's admin API returns the key in plain
+text, so any Silo administrator or admin API key can read it.
+
+A request for the whole series changes nothing when riven-ts tracks some
+seasons of the show. riven-ts keeps its season list and cannot widen it to the
+whole show.
+
+Silo cannot request single episodes, and riven-ts's `requestItem` takes only
+seasons, so the plugin requests whole seasons.
 
 ## How status maps
 
@@ -101,6 +157,12 @@ as it indexes the movie.
 | Media `failed` or `paused` | `failed` |
 | Media `scraped`, `downloaded`, or `partially_completed` | `downloading` |
 | Media `indexed`, `unreleased`, or any other state | `queued` |
+
+For a request that names seasons, the plugin reads the state of the riven-ts
+seasons they map to instead of the whole show. Seasons that all share a state give that state.
+Otherwise any finished season gives `partially_completed`, any season in
+progress gives `scraped`, and the rest give `indexed`. A season riven-ts does
+not track yet counts as not started.
 
 Silo shows the media item's state as the external status. Before riven-ts
 indexes the item, it shows the request's state.
