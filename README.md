@@ -42,8 +42,8 @@ riven-rs plugin.
 
 ## Connect Silo to riven-ts
 
-Each Riven request server in Silo has a base URL and an API key. The plugin has
-no other settings.
+Each Riven request server in Silo has a base URL and an API key, and an
+optional TMDB API key that [Seasons](#seasons) describes.
 
 1. Set `RIVEN_SETTING__apiKey` on riven-ts to a key of at least 32 characters,
    for example the output of `openssl rand -hex 32`. If the setting is unset,
@@ -117,13 +117,21 @@ There are two exceptions.
 
 Silo numbers seasons like TMDB, and riven-ts numbers them like TVDB. The two
 disagree for some series. Bleach, for example, has two seasons on TMDB and
-seventeen on TVDB. So Silo also sends each requested season's first air date
-and episode count. The plugin looks up the show's episodes through riven-ts's
+seventeen on TVDB. To match them, the plugin uses each requested season's first
+air date and episode count. It looks up the show's episodes through riven-ts's
 TVDB indexer, takes that many episodes airing from that date, and asks riven-ts
 for the seasons they belong to. Bleach's second TMDB season becomes TVDB season
 17. riven-ts fetches whole seasons, so when a TMDB season covers part of a TVDB
 season, riven-ts fetches all of that TVDB season. Specials, and a season
 without an air date or episode count, keep their number.
+
+Silo is meant to send the air dates and episode counts with the request, but
+current Silo builds do not yet (Silo-Server/silo-server#4484). Until they do,
+the plugin matches seasons by number unless the Riven request server has a TMDB
+API key. With a key, the plugin reads the air dates and episode counts from
+TMDB. Enter a TMDB API key or an API Read Access Token in the server's **TMDB
+API key** field. If the TMDB lookup fails, the request fails instead of going
+to the season with the same number.
 
 A request for the whole series changes nothing when riven-ts tracks some
 seasons of the show. riven-ts keeps its season list and cannot widen it to the
