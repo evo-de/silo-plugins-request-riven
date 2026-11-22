@@ -91,7 +91,9 @@ Docker network.
 A series request in Silo can name seasons. The plugin passes them to riven-ts
 as `requestedSeasons`, and riven-ts fetches only those seasons. When riven-ts
 already tracks some seasons of the show, it adds the new ones to its list.
-Asking again for seasons riven-ts already tracks changes nothing.
+Asking again for seasons riven-ts already tracks changes nothing. Once the list
+covers every season but Specials, riven-ts turns it into a whole-show request
+when it next indexes the show, so it also fetches seasons that air later.
 
 There are two exceptions.
 
