@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
@@ -164,4 +165,75 @@ func ItemStatus(ctx context.Context, client *httpclient.Client, item Item) (Item
 		state.Seasons[season.Number] = season.State
 	}
 	return state, nil
+}
+
+// Episode is one regular episode of a show, numbered the way riven-ts indexes
+// shows: by TVDB, in official order.
+type Episode struct {
+	Season int32
+	Number int32
+	// AirDate is YYYY-MM-DD, or empty when TVDB has no date for the episode.
+	AirDate string
+}
+
+const showSeasonsQuery = `
+query($id: ID!) {
+  tmdbItem(id: $id, type: show) { seasons { number } }
+}`
+
+// Episodes looks up a show's regular episodes through riven-ts's TVDB
+// indexer, so it works before riven-ts has indexed the show. riven-ts lists a
+// show's seasons without their episodes, so a second query asks for each
+// season's episodes. A show TVDB does not know has no episodes.
+func Episodes(ctx context.Context, client *httpclient.Client, tvdbID string) ([]Episode, error) {
+	type seasonsData struct {
+		Show *struct {
+			Seasons []struct {
+				Number int32 `json:"number"`
+			} `json:"seasons"`
+		} `json:"tmdbItem"`
+	}
+	d, err := do[seasonsData](ctx, client, showSeasonsQuery, map[string]any{"id": tvdbID})
+	if err != nil || d.Show == nil {
+		return nil, err
+	}
+
+	var numbers []int32
+	var fields []string
+	for _, season := range d.Show.Seasons {
+		if season.Number > 0 {
+			numbers = append(numbers, season.Number)
+			fields = append(fields, fmt.Sprintf("s%d: season(number: %d) { episodes { number airDate } }", season.Number, season.Number))
+		}
+	}
+	if len(fields) == 0 {
+		return nil, nil
+	}
+
+	type episodesData struct {
+		Show map[string]*struct {
+			Episodes []struct {
+				Number  int32  `json:"number"`
+				AirDate string `json:"airDate"`
+			} `json:"episodes"`
+		} `json:"tmdbItem"`
+	}
+	query := "query($id: ID!) {\n  tmdbItem(id: $id, type: show) {\n    " + strings.Join(fields, "\n    ") + "\n  }\n}"
+	e, err := do[episodesData](ctx, client, query, map[string]any{"id": tvdbID})
+	if err != nil {
+		return nil, err
+	}
+	var episodes []Episode
+	for _, number := range numbers {
+		season := e.Show[fmt.Sprintf("s%d", number)]
+		if season == nil {
+			continue
+		}
+		for _, episode := range season.Episodes {
+			// airDate is an ISO timestamp at midnight UTC, e.g. 2025-03-30T00:00:00.000Z.
+			airDate, _, _ := strings.Cut(episode.AirDate, "T")
+			episodes = append(episodes, Episode{Season: number, Number: episode.Number, AirDate: airDate})
+		}
+	}
+	return episodes, nil
 }

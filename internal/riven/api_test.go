@@ -218,3 +218,45 @@ func TestPing(t *testing.T) {
 		t.Fatal("want an error when riven rejects the key")
 	}
 }
+
+func TestEpisodes(t *testing.T) {
+	stub, client := newStub(t,
+		`{"data":{"tmdbItem":{"seasons":[{"number":0},{"number":1},{"number":2}]}}}`,
+		`{"data":{"tmdbItem":{"s1":{"episodes":[{"number":1,"airDate":"2025-03-30T00:00:00.000Z"},{"number":2,"airDate":null}]},"s2":{"episodes":[{"number":1,"airDate":"2026-01-04T00:00:00.000Z"}]}}}}`,
+	)
+
+	got, err := Episodes(context.Background(), client, "99")
+	if err != nil {
+		t.Fatalf("Episodes: %v", err)
+	}
+	want := []Episode{{Season: 1, Number: 1, AirDate: "2025-03-30"}, {Season: 1, Number: 2}, {Season: 2, Number: 1, AirDate: "2026-01-04"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("episodes: want %+v, got %+v", want, got)
+	}
+	if len(stub.calls) != 2 {
+		t.Fatalf("want 2 requests, got %d", len(stub.calls))
+	}
+	for _, call := range stub.calls {
+		if !reflect.DeepEqual(call.Variables, map[string]any{"id": "99"}) {
+			t.Fatalf("variables: want the TVDB id, got %v", call.Variables)
+		}
+	}
+	// Specials are not regular episodes, so their season is not fetched.
+	episodesQuery := stub.calls[1].Query
+	if !strings.Contains(episodesQuery, "s1: season(number: 1)") || !strings.Contains(episodesQuery, "s2: season(number: 2)") ||
+		strings.Contains(episodesQuery, "season(number: 0)") {
+		t.Fatalf("want seasons 1 and 2 without Specials, got: %s", episodesQuery)
+	}
+}
+
+func TestEpisodesOfUnknownShow(t *testing.T) {
+	stub, client := newStub(t, `{"data":{"tmdbItem":null}}`)
+
+	got, err := Episodes(context.Background(), client, "99")
+	if err != nil || got != nil {
+		t.Fatalf("want no episodes and no error, got %v, %v", got, err)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("want 1 request, got %d", len(stub.calls))
+	}
+}

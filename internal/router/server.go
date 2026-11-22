@@ -1,9 +1,11 @@
 package router
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
+	"strings"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
@@ -54,7 +56,7 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	for _, c := range req.GetConnections() {
 		conn := connectionFromRouter(c)
 		status := "queued"
-		message, err := submit(ctx, riven.NewClient(conn.BaseURL, conn.APIKey), item)
+		message, err := submit(ctx, riven.NewClient(conn.BaseURL, conn.APIKey), item, req.GetRequest().GetSeasonDetails())
 		if err != nil {
 			status, message = "failed", err.Error()
 		}
@@ -76,11 +78,76 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	return &pluginv1.FulfillResponse{Targets: targets}, nil
 }
 
-// submit asks riven-ts for the item. It does not send a request for some
-// seasons of a show that riven-ts tracks as a whole. riven-ts would replace the
-// whole-show request with those seasons and stop tracking the others when it
-// next indexes the show.
-func submit(ctx context.Context, client *httpclient.Client, item riven.Item) (string, error) {
+// resolveSeasons turns the item's seasons from Silo's numbers, which follow
+// TMDB, into riven-ts's, which follow TVDB. It looks up the show's episodes
+// only when Silo sent a season's first air date and episode count.
+func resolveSeasons(ctx context.Context, client *httpclient.Client, item riven.Item, details []*pluginv1.RequestedSeason) (riven.Item, error) {
+	if !slices.ContainsFunc(item.Seasons, func(number int32) bool { return usableDetail(details, number) != nil }) {
+		return item, nil
+	}
+	episodes, err := riven.Episodes(ctx, client, item.ID)
+	if err != nil {
+		return item, err
+	}
+	item.Seasons = rivenSeasons(item.Seasons, details, episodes)
+	return item, nil
+}
+
+// usableDetail returns the detail Silo sent for a regular season, or nil when
+// it sent none or one without a date or an episode count.
+func usableDetail(details []*pluginv1.RequestedSeason, number int32) *pluginv1.RequestedSeason {
+	if number == 0 {
+		return nil
+	}
+	for _, d := range details {
+		if d.GetNumber() == number && d.GetFirstAirDate() != "" && d.GetEpisodeCount() > 0 {
+			return d
+		}
+	}
+	return nil
+}
+
+// rivenSeasons finds each requested season the way Silo's request contract
+// describes. The season is the first episode_count regular episodes, in airing
+// order, that air on or after its first air date, or the ones that do when
+// fewer match. riven-ts fetches whole seasons, so the result is every riven-ts
+// season those episodes belong to. Specials, a season without a usable detail,
+// and a season no episode matches keep their number.
+func rivenSeasons(seasons []int32, details []*pluginv1.RequestedSeason, episodes []riven.Episode) []int32 {
+	aired := slices.DeleteFunc(slices.Clone(episodes), func(e riven.Episode) bool { return e.AirDate == "" })
+	slices.SortFunc(aired, func(a, b riven.Episode) int {
+		return cmp.Or(strings.Compare(a.AirDate, b.AirDate), cmp.Compare(a.Season, b.Season), cmp.Compare(a.Number, b.Number))
+	})
+
+	var out []int32
+	for _, number := range seasons {
+		var matched []riven.Episode
+		if d := usableDetail(details, number); d != nil {
+			start := slices.IndexFunc(aired, func(e riven.Episode) bool { return e.AirDate >= d.GetFirstAirDate() })
+			if start >= 0 {
+				matched = aired[start:min(start+int(d.GetEpisodeCount()), len(aired))]
+			}
+		}
+		if len(matched) == 0 {
+			out = append(out, number)
+		}
+		for _, e := range matched {
+			out = append(out, e.Season)
+		}
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// submit asks riven-ts for the item, with its seasons in riven-ts's numbers.
+// It does not send a request for some seasons of a show that riven-ts tracks as
+// a whole. riven-ts would replace the whole-show request with those seasons and
+// stop tracking the others when it next indexes the show.
+func submit(ctx context.Context, client *httpclient.Client, item riven.Item, details []*pluginv1.RequestedSeason) (string, error) {
+	item, err := resolveSeasons(ctx, client, item, details)
+	if err != nil {
+		return "", err
+	}
 	if item.Type == riven.Show && len(item.Seasons) > 0 {
 		state, err := riven.ItemStatus(ctx, client, item)
 		if err != nil {
@@ -114,12 +181,16 @@ func (s *Server) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusReque
 		if !ok {
 			continue
 		}
-		state, err := riven.ItemStatus(ctx, client, item)
+		resolved, err := resolveSeasons(ctx, client, item, req.GetRequest().GetSeasonDetails())
 		if err != nil {
 			continue
 		}
-		if len(item.Seasons) > 0 && state.Seasons != nil {
-			state.Media = seasonsState(state.Seasons, item.Seasons)
+		state, err := riven.ItemStatus(ctx, client, resolved)
+		if err != nil {
+			continue
+		}
+		if len(resolved.Seasons) > 0 && state.Seasons != nil {
+			state.Media = seasonsState(state.Seasons, resolved.Seasons)
 		}
 		status, externalStatus := mapState(state)
 		statuses = append(statuses, &pluginv1.TargetStatus{

@@ -6,10 +6,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+
+	"github.com/evo-de/silo-plugins-request-riven/internal/riven"
 )
 
 const unauthenticated = `{"data":null,"errors":[{"message":"Access denied! You need to be authenticated to perform this action!","extensions":{"code":"UNAUTHENTICATED"}}]}`
@@ -442,5 +446,142 @@ func TestCheckStatusReadsTheRequestedSeasons(t *testing.T) {
 				t.Fatalf("want %s/%q, got %+v", tc.wantStatus, tc.wantES, st)
 			}
 		})
+	}
+}
+
+// weekly returns count episodes of a riven-ts season, one a week from start.
+func weekly(season int32, count int, start string) []riven.Episode {
+	day, _ := time.Parse(time.DateOnly, start)
+	episodes := make([]riven.Episode, count)
+	for i := range episodes {
+		episodes[i] = riven.Episode{Season: season, Number: int32(i + 1), AirDate: day.AddDate(0, 0, 7*i).Format(time.DateOnly)}
+	}
+	return episodes
+}
+
+func TestRivenSeasonsMatchesByAirDate(t *testing.T) {
+	// riven-ts splits the year into two 12-episode seasons.
+	split := append(weekly(1, 12, "2024-01-07"), weekly(2, 12, "2024-07-07")...)
+	// riven-ts keeps 24 weekly episodes in one season.
+	merged := weekly(1, 24, "2024-01-07")
+	unaired := append(weekly(1, 12, "2024-01-07"), riven.Episode{Season: 2, Number: 1})
+
+	detail := func(number int32, date string, count int32) []*pluginv1.RequestedSeason {
+		return []*pluginv1.RequestedSeason{{Number: number, FirstAirDate: date, EpisodeCount: count}}
+	}
+	cases := []struct {
+		name     string
+		seasons  []int32
+		details  []*pluginv1.RequestedSeason
+		episodes []riven.Episode
+		want     []int32
+	}{
+		{"same numbering", []int32{2}, detail(2, "2024-07-07", 12), split, []int32{2}},
+		{"season that ends where riven-ts's ends", []int32{1}, detail(1, "2024-01-07", 12), split, []int32{1}},
+		{"one season split in two", []int32{1}, detail(1, "2024-01-07", 24), split, []int32{1, 2}},
+		{"two seasons merged into one", []int32{2}, detail(2, "2024-03-31", 12), merged, []int32{1}},
+		{"fewer episodes than the count", []int32{2}, detail(2, "2024-07-07", 20), split, []int32{2}},
+		{"no detail", []int32{3}, nil, split, []int32{3}},
+		{"detail without a date", []int32{2}, detail(2, "", 12), merged, []int32{2}},
+		{"detail with a count of 0", []int32{2}, detail(2, "2024-03-31", 0), merged, []int32{2}},
+		{"no episode on or after the date", []int32{2}, detail(2, "2030-01-01", 12), merged, []int32{2}},
+		{"episodes without a date are skipped", []int32{2}, detail(2, "2025-01-01", 8), unaired, []int32{2}},
+		{"Specials keep their number", []int32{0}, detail(0, "2024-01-07", 5), merged, []int32{0}},
+		{"Specials with a split season", []int32{0, 1}, detail(1, "2024-01-07", 24), split, []int32{0, 1, 2}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rivenSeasons(tc.seasons, tc.details, tc.episodes); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("want riven-ts seasons %v, got %v", tc.want, got)
+			}
+		})
+	}
+}
+
+// splitShow answers riven-ts's TVDB lookup for a show that riven-ts splits
+// into two 12-episode seasons, while Silo counts one 24-episode season.
+func splitShow() map[string]string {
+	season := func(start string) string {
+		var eps []string
+		for _, e := range weekly(1, 12, start) {
+			eps = append(eps, `{"number":`+strconv.Itoa(int(e.Number))+`,"airDate":"`+e.AirDate+`T00:00:00.000Z"}`)
+		}
+		return `{"episodes":[` + strings.Join(eps, ",") + `]}`
+	}
+	return map[string]string{
+		"seasons { number }": `{"data":{"tmdbItem":{"seasons":[{"number":1},{"number":2}]}}}`,
+		"season(number:":     `{"data":{"tmdbItem":{"s1":` + season("2024-01-07") + `,"s2":` + season("2024-07-07") + `}}}`,
+	}
+}
+
+var oneLongSeason = []*pluginv1.RequestedSeason{{Number: 1, FirstAirDate: "2024-01-07", EpisodeCount: 24}}
+
+func TestFulfillRequestsTheSeasonsTheAirDatesMatch(t *testing.T) {
+	stubs := splitShow()
+	stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":null}}`
+	stubs["requestItem("] = `{"data":{"requestItem":true}}`
+	srv, f := startFakeRiven(t, stubs)
+
+	resp, err := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
+		Request: &pluginv1.RequestDescriptor{
+			MediaType: "series", ExternalIds: map[string]string{"tvdb": "99"},
+			Seasons: []int32{1}, SeasonDetails: oneLongSeason,
+		},
+		Connections: []*pluginv1.RouterConnection{routerConn("c1", srv.URL)},
+	})
+	if err != nil {
+		t.Fatalf("Fulfill: %v", err)
+	}
+	if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "queued" {
+		t.Fatalf("want a queued target, got %+v", tgt)
+	}
+	last := f.received[len(f.received)-1]
+	if got := last.Variables["input"].(map[string]any)["requestedSeasons"]; !reflect.DeepEqual(got, []any{1.0, 2.0}) {
+		t.Fatalf("riven was asked for seasons %v, want [1 2]", got)
+	}
+}
+
+func TestFulfillFailsWhenTheEpisodeLookupFails(t *testing.T) {
+	srv, f := startFakeRiven(t, map[string]string{"seasons { number }": unauthenticated, "requestItem(": `{"data":{"requestItem":true}}`})
+
+	resp, err := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
+		Request: &pluginv1.RequestDescriptor{
+			MediaType: "series", ExternalIds: map[string]string{"tvdb": "99"},
+			Seasons: []int32{1}, SeasonDetails: oneLongSeason,
+		},
+		Connections: []*pluginv1.RouterConnection{routerConn("c1", srv.URL)},
+	})
+	if err != nil {
+		t.Fatalf("Fulfill: %v", err)
+	}
+	if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "failed" || !strings.Contains(tgt.GetMessage(), "Access denied") {
+		t.Fatalf("want a failed target with riven's message, got %+v", tgt)
+	}
+	for _, call := range f.received {
+		if strings.Contains(call.Query, "requestItem(") {
+			t.Fatal("want no request when the lookup fails")
+		}
+	}
+}
+
+func TestCheckStatusReadsTheSeasonsTheAirDatesMatch(t *testing.T) {
+	stubs := splitShow()
+	stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":{"state":"processing","seasons":[1,2],"primaryMediaItem":{"state":"partially_completed","seasons":[{"number":1,"state":"completed"},{"number":2,"state":"indexed"}]}}}}`
+	srv, _ := startFakeRiven(t, stubs)
+
+	resp, err := New().CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
+		Request: &pluginv1.RequestDescriptor{
+			MediaType: "series", ExternalIds: map[string]string{"tvdb": "99"},
+			Seasons: []int32{1}, SeasonDetails: oneLongSeason,
+		},
+		Targets:     []*pluginv1.TargetRef{{Quality: "1080p", ConnectionId: "c1", ExternalId: "99"}},
+		Connections: []*pluginv1.RouterConnection{routerConn("c1", srv.URL)},
+	})
+	if err != nil {
+		t.Fatalf("CheckStatus: %v", err)
+	}
+	// Silo's season 1 is riven-ts's seasons 1 and 2, and only the first is done.
+	if st := resp.GetStatuses()[0]; st.GetStatus() != "downloading" || st.GetExternalStatus() != "partially_completed" {
+		t.Fatalf("want downloading/partially_completed, got %+v", st)
 	}
 }
