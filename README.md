@@ -187,7 +187,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/plugin-linux-am
 ```
 
 `index.json` repeats `manifest.json` for the catalog. A test fails when the two
-differ.
+differ. Silo reads `index.json` as plain JSON, so an enum there must be its
+number. Write `"control": 3` in `index.json` where `manifest.json` has
+`"control": "ADMIN_FORM_CONTROL_PASSWORD"`. A name stops Silo from reading the
+catalog.
 
 ## Release
 
