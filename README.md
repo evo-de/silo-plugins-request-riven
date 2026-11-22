@@ -131,7 +131,8 @@ the plugin matches seasons by number unless the Riven request server has a TMDB
 API key. With a key, the plugin reads the air dates and episode counts from
 TMDB. Enter a TMDB API key or an API Read Access Token in the server's **TMDB
 API key** field. If the TMDB lookup fails, the request fails instead of going
-to the season with the same number.
+to the season with the same number. Silo's admin API returns the key in plain
+text, so any Silo administrator or admin API key can read it.
 
 A request for the whole series changes nothing when riven-ts tracks some
 seasons of the show. riven-ts keeps its season list and cannot widen it to the
