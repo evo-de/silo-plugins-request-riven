@@ -105,10 +105,15 @@ There are two exceptions.
   for the Specials of such a show fails, because adding them would drop the
   other seasons.
 
-Season numbers come from Silo, which numbers seasons like TMDB. riven-ts
-numbers them like TVDB. The two agree for most series. For a series they
-number differently, such as some anime, riven-ts fetches the season with the
-same number.
+Silo numbers seasons like TMDB, and riven-ts numbers them like TVDB. The two
+disagree for some series. Bleach, for example, has two seasons on TMDB and
+seventeen on TVDB. So Silo also sends each requested season's first air date
+and episode count. The plugin looks up the show's episodes through riven-ts's
+TVDB indexer, takes that many episodes airing from that date, and asks riven-ts
+for the seasons they belong to. Bleach's second TMDB season becomes TVDB season
+17. riven-ts fetches whole seasons, so when a TMDB season covers part of a TVDB
+season, riven-ts fetches all of that TVDB season. Specials, and a season
+without an air date or episode count, keep their number.
 
 A request for the whole series changes nothing when riven-ts tracks some
 seasons of the show. riven-ts keeps its season list and cannot widen it to the
@@ -134,8 +139,8 @@ as it indexes the movie.
 | Media `scraped`, `downloaded`, or `partially_completed` | `downloading` |
 | Media `indexed`, `unreleased`, or any other state | `queued` |
 
-For a request that names seasons, the plugin reads the state of those seasons
-instead of the whole show. Seasons that all share a state give that state.
+For a request that names seasons, the plugin reads the state of the riven-ts
+seasons they map to instead of the whole show. Seasons that all share a state give that state.
 Otherwise any finished season gives `partially_completed`, any season in
 progress gives `scraped`, and the rest give `indexed`. A season riven-ts does
 not track yet counts as not started.
