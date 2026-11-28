@@ -1,49 +1,31 @@
 package router
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"slices"
-	"strings"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/httpclient"
 
 	"github.com/evo-de/silo-plugins-request-riven/internal/riven"
 	"github.com/evo-de/silo-plugins-request-riven/internal/tmdb"
+	"github.com/evo-de/silo-plugins-request-riven/internal/translate"
 )
 
 // Server implements the request_router.v1 RPCs. It is stateless.
 type Server struct {
 	pluginv1.UnimplementedRequestRouterServer
-	tmdbURL string
+	translator *translate.Translator
 }
 
 // New returns a ready-to-serve request router.
-func New() *Server { return &Server{tmdbURL: tmdb.BaseURL} }
+func New() *Server { return &Server{translator: translate.New(tmdb.BaseURL)} }
 
 const requestedBySilo = "silo"
 
-// rivenItem never falls back to IMDb. riven-ts accepts an IMDb-only request
-// and then never indexes it. A movie fails with "Item request is missing
-// tmdbId", and the TVDB indexer cannot look up a show by IMDb id.
-func rivenItem(d *pluginv1.RequestDescriptor) (riven.Item, error) {
-	ids := d.GetExternalIds()
-	if d.GetMediaType() == "series" {
-		if id := ids["tvdb"]; id != "" {
-			return riven.Item{Type: riven.Show, ID: id, Seasons: d.GetSeasons()}, nil
-		}
-		return riven.Item{}, errors.New("request has no TVDB id; riven-ts tracks shows by TVDB id")
-	}
-	if id := ids["tmdb"]; id != "" {
-		return riven.Item{Type: riven.Movie, ID: id}, nil
-	}
-	return riven.Item{}, errors.New("request has no TMDB id; riven-ts tracks movies by TMDB id")
-}
-
 func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pluginv1.FulfillResponse, error) {
-	item, err := rivenItem(req.GetRequest())
+	request, err := s.translator.Request(req.GetRequest())
 	if err != nil {
 		// One request-level failure, not N identical per-target failures.
 		return &pluginv1.FulfillResponse{Message: err.Error()}, nil
@@ -54,21 +36,27 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		qualities = []*pluginv1.RequestedQuality{{Id: "any"}}
 	}
 
-	var targets []*pluginv1.FulfillmentTarget
-	for _, c := range req.GetConnections() {
-		conn := connectionFromRouter(c)
-		status := "queued"
-		message, err := s.submit(ctx, conn, item, req.GetRequest())
+	answers := askEach(req.GetConnections(), func(conn Connection, client *httpclient.Client) (string, error) {
+		item, err := request.ItemOn(ctx, client, conn.TMDBKey)
 		if err != nil {
-			status, message = "failed", err.Error()
+			return "", err
+		}
+		return submit(ctx, client, item)
+	})
+
+	var targets []*pluginv1.FulfillmentTarget
+	for _, a := range answers {
+		status, message := "queued", a.value
+		if a.err != nil {
+			status, message = "failed", a.err.Error()
 		}
 		// Silo marks a requested quality with no target as failed, so every
 		// quality gets a copy of the one request's outcome.
 		for _, q := range qualities {
 			targets = append(targets, &pluginv1.FulfillmentTarget{
 				Quality:      q.GetId(),
-				ConnectionId: conn.ID,
-				ExternalId:   item.ID,
+				ConnectionId: a.conn.ID,
+				ExternalId:   request.LookupID(),
 				Status:       status,
 				Message:      message,
 			})
@@ -80,106 +68,11 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	return &pluginv1.FulfillResponse{Targets: targets}, nil
 }
 
-// seasonDetails returns the first air date and episode count of each requested
-// season. Silo does not send them yet (Silo-Server/silo-server#4484), so when
-// the connection has a TMDB key, the plugin reads them from TMDB. Without a key
-// or a TMDB id it returns none, and the seasons keep their numbers.
-func (s *Server) seasonDetails(ctx context.Context, conn Connection, d *pluginv1.RequestDescriptor) ([]*pluginv1.RequestedSeason, error) {
-	if details := d.GetSeasonDetails(); len(details) > 0 {
-		return details, nil
-	}
-	showID := d.GetExternalIds()["tmdb"]
-	if d.GetMediaType() != "series" || len(d.GetSeasons()) == 0 || conn.TMDBKey == "" || showID == "" {
-		return nil, nil
-	}
-	seasons, err := tmdb.Seasons(ctx, s.tmdbURL, conn.TMDBKey, showID)
-	if err != nil {
-		return nil, err
-	}
-	var details []*pluginv1.RequestedSeason
-	for _, season := range seasons {
-		if slices.Contains(d.GetSeasons(), season.Number) {
-			details = append(details, &pluginv1.RequestedSeason{Number: season.Number, FirstAirDate: season.AirDate, EpisodeCount: season.EpisodeCount})
-		}
-	}
-	return details, nil
-}
-
-// resolveSeasons turns the item's seasons from Silo's numbers, which follow
-// TMDB, into riven-ts's, which follow TVDB. It looks up the show's episodes
-// only when it has a season's first air date and episode count.
-func resolveSeasons(ctx context.Context, client *httpclient.Client, item riven.Item, details []*pluginv1.RequestedSeason) (riven.Item, error) {
-	if !slices.ContainsFunc(item.Seasons, func(number int32) bool { return usableDetail(details, number) != nil }) {
-		return item, nil
-	}
-	episodes, err := riven.Episodes(ctx, client, item.ID)
-	if err != nil {
-		return item, err
-	}
-	item.Seasons = rivenSeasons(item.Seasons, details, episodes)
-	return item, nil
-}
-
-// usableDetail returns the detail for a regular season, or nil when there is
-// none or it has no date or no episode count.
-func usableDetail(details []*pluginv1.RequestedSeason, number int32) *pluginv1.RequestedSeason {
-	if number == 0 {
-		return nil
-	}
-	for _, d := range details {
-		if d.GetNumber() == number && d.GetFirstAirDate() != "" && d.GetEpisodeCount() > 0 {
-			return d
-		}
-	}
-	return nil
-}
-
-// rivenSeasons finds each requested season the way Silo's request contract
-// describes. The season is the first episode_count regular episodes, in airing
-// order, that air on or after its first air date, or the ones that do when
-// fewer match. riven-ts fetches whole seasons, so the result is every riven-ts
-// season those episodes belong to. Specials, a season without a usable detail,
-// and a season no episode matches keep their number.
-func rivenSeasons(seasons []int32, details []*pluginv1.RequestedSeason, episodes []riven.Episode) []int32 {
-	aired := slices.DeleteFunc(slices.Clone(episodes), func(e riven.Episode) bool { return e.AirDate == "" })
-	slices.SortFunc(aired, func(a, b riven.Episode) int {
-		return cmp.Or(strings.Compare(a.AirDate, b.AirDate), cmp.Compare(a.Season, b.Season), cmp.Compare(a.Number, b.Number))
-	})
-
-	var out []int32
-	for _, number := range seasons {
-		var matched []riven.Episode
-		if d := usableDetail(details, number); d != nil {
-			start := slices.IndexFunc(aired, func(e riven.Episode) bool { return e.AirDate >= d.GetFirstAirDate() })
-			if start >= 0 {
-				matched = aired[start:min(start+int(d.GetEpisodeCount()), len(aired))]
-			}
-		}
-		if len(matched) == 0 {
-			out = append(out, number)
-		}
-		for _, e := range matched {
-			out = append(out, e.Season)
-		}
-	}
-	slices.Sort(out)
-	return slices.Compact(out)
-}
-
-// submit asks riven-ts for the item, with its seasons in riven-ts's numbers.
-// It does not send a request for some seasons of a show that riven-ts tracks as
-// a whole. riven-ts would replace the whole-show request with those seasons and
-// stop tracking the others when it next indexes the show.
-func (s *Server) submit(ctx context.Context, conn Connection, item riven.Item, d *pluginv1.RequestDescriptor) (string, error) {
-	details, err := s.seasonDetails(ctx, conn, d)
-	if err != nil {
-		return "", err
-	}
-	client := riven.NewClient(conn.BaseURL, conn.APIKey)
-	item, err = resolveSeasons(ctx, client, item, details)
-	if err != nil {
-		return "", err
-	}
+// submit asks riven-ts for the item. It does not send a request for some
+// seasons of a show that riven-ts tracks as a whole. riven-ts would replace the
+// whole-show request with those seasons and stop tracking the others when it
+// next indexes the show.
+func submit(ctx context.Context, client *httpclient.Client, item riven.Item) (string, error) {
 	if item.Type == riven.Show && len(item.Seasons) > 0 {
 		state, err := riven.ItemStatus(ctx, client, item)
 		if err != nil {
@@ -196,48 +89,78 @@ func (s *Server) submit(ctx context.Context, conn Connection, item riven.Item, d
 }
 
 func (s *Server) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusRequest) (*pluginv1.CheckStatusResponse, error) {
-	item, err := rivenItem(req.GetRequest())
+	request, err := s.translator.Request(req.GetRequest())
 	if err != nil {
 		return &pluginv1.CheckStatusResponse{}, nil
 	}
 
-	byID := make(map[string]Connection, len(req.GetConnections()))
-	for _, c := range req.GetConnections() {
-		conn := connectionFromRouter(c)
-		byID[conn.ID] = conn
+	// Ask only the connections some target names. riven-ts has no quality
+	// tiers, so a connection's targets share its one answer.
+	named := make(map[string]bool, len(req.GetTargets()))
+	for _, tref := range req.GetTargets() {
+		named[tref.GetConnectionId()] = true
+	}
+	conns := slices.DeleteFunc(slices.Clone(req.GetConnections()), func(c *pluginv1.RouterConnection) bool { return !named[c.GetId()] })
+	answers := askEach(conns, func(conn Connection, client *httpclient.Client) (progress, error) {
+		item, err := request.ItemOn(ctx, client, conn.TMDBKey)
+		if err != nil {
+			return progress{}, err
+		}
+		state, err := riven.ItemStatus(ctx, client, item)
+		if err != nil {
+			return progress{}, err
+		}
+		if len(item.Seasons) > 0 && state.Seasons != nil {
+			state.Media = seasonsState(state.Seasons, item.Seasons)
+		}
+		status, externalStatus := mapState(state)
+		return progress{status: status, externalStatus: externalStatus}, nil
+	})
+	byID := make(map[string]answer[progress], len(answers))
+	for _, a := range answers {
+		byID[a.conn.ID] = a
 	}
 
 	var statuses []*pluginv1.TargetStatus
 	for _, tref := range req.GetTargets() {
-		conn, ok := byID[tref.GetConnectionId()]
-		if !ok {
+		a, ok := byID[tref.GetConnectionId()]
+		if !ok || a.err != nil {
+			// An unknown connection, or a lookup that failed: skip it and let
+			// the next cycle retry.
 			continue
 		}
-		details, err := s.seasonDetails(ctx, conn, req.GetRequest())
-		if err != nil {
-			continue
-		}
-		client := riven.NewClient(conn.BaseURL, conn.APIKey)
-		resolved, err := resolveSeasons(ctx, client, item, details)
-		if err != nil {
-			continue
-		}
-		state, err := riven.ItemStatus(ctx, client, resolved)
-		if err != nil {
-			continue
-		}
-		if len(resolved.Seasons) > 0 && state.Seasons != nil {
-			state.Media = seasonsState(state.Seasons, resolved.Seasons)
-		}
-		status, externalStatus := mapState(state)
 		statuses = append(statuses, &pluginv1.TargetStatus{
 			Quality:        tref.GetQuality(),
 			ConnectionId:   tref.GetConnectionId(),
-			Status:         status,
-			ExternalStatus: externalStatus,
+			Status:         a.value.status,
+			ExternalStatus: a.value.externalStatus,
 		})
 	}
 	return &pluginv1.CheckStatusResponse{Statuses: statuses}, nil
+}
+
+// progress is a connection's answer to CheckStatus.
+type progress struct {
+	status, externalStatus string
+}
+
+// answer is one connection's reply in a fan-out.
+type answer[T any] struct {
+	conn  Connection
+	value T
+	err   error
+}
+
+// askEach asks each connection once, in order, with one riven-ts client per
+// connection. A failure stays with the connection it happened on.
+func askEach[T any](conns []*pluginv1.RouterConnection, ask func(Connection, *httpclient.Client) (T, error)) []answer[T] {
+	answers := make([]answer[T], 0, len(conns))
+	for _, c := range conns {
+		conn := connectionFromRouter(c)
+		value, err := ask(conn, riven.NewClient(conn.BaseURL, conn.APIKey))
+		answers = append(answers, answer[T]{conn: conn, value: value, err: err})
+	}
+	return answers
 }
 
 var mediaStatuses = map[string]string{

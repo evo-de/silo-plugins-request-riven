@@ -3,10 +3,11 @@ package tmdb
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/evo-de/silo-plugins-request-riven/internal/tmdb/tmdbtest"
 )
 
 const v4Token = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJrIn0.c2lnbmF0dXJl"
@@ -17,21 +18,8 @@ const bleach = `{"id":30984,"name":"Bleach","seasons":[
 	{"air_date":"2022-10-11","episode_count":50,"id":3,"name":"Thousand-Year Blood War","season_number":2}
 ]}`
 
-func startTMDB(t *testing.T, status int, body string) (*httptest.Server, *[]*http.Request) {
-	t.Helper()
-	var received []*http.Request
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		received = append(received, r)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = w.Write([]byte(body))
-	}))
-	t.Cleanup(srv.Close)
-	return srv, &received
-}
-
 func TestSeasonsReadsTheShowsSeasons(t *testing.T) {
-	srv, received := startTMDB(t, http.StatusOK, bleach)
+	srv := tmdbtest.Start(t, http.StatusOK, bleach)
 
 	seasons, err := Seasons(context.Background(), srv.URL, v4Token, "30984")
 	if err != nil {
@@ -45,8 +33,8 @@ func TestSeasonsReadsTheShowsSeasons(t *testing.T) {
 	if !reflect.DeepEqual(seasons, want) {
 		t.Fatalf("want %+v, got %+v", want, seasons)
 	}
-	if len(*received) != 1 || (*received)[0].Method != http.MethodGet || (*received)[0].URL.Path != "/tv/30984" {
-		t.Fatalf("want one GET /tv/30984, got %d requests", len(*received))
+	if received := srv.Requests(); len(received) != 1 || received[0].Method != http.MethodGet || received[0].Path != "/tv/30984" {
+		t.Fatalf("want one GET /tv/30984, got %+v", received)
 	}
 }
 
@@ -63,16 +51,16 @@ func TestSeasonsSendsTheKeyTheWayTMDBReadsIt(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, received := startTMDB(t, http.StatusOK, bleach)
+			srv := tmdbtest.Start(t, http.StatusOK, bleach)
 
 			if _, err := Seasons(context.Background(), srv.URL, tc.key, "30984"); err != nil {
 				t.Fatalf("Seasons: %v", err)
 			}
-			r := (*received)[0]
+			r := srv.Requests()[0]
 			if got := r.Header.Get("Authorization"); got != tc.wantHeader {
 				t.Fatalf("Authorization: want %q, got %q", tc.wantHeader, got)
 			}
-			if got := r.URL.Query().Get("api_key"); got != tc.wantQuery {
+			if got := r.Query.Get("api_key"); got != tc.wantQuery {
 				t.Fatalf("api_key: want %q, got %q", tc.wantQuery, got)
 			}
 		})
@@ -80,7 +68,7 @@ func TestSeasonsSendsTheKeyTheWayTMDBReadsIt(t *testing.T) {
 }
 
 func TestSeasonsFailsOnAnErrorStatus(t *testing.T) {
-	srv, _ := startTMDB(t, http.StatusUnauthorized, `{"status_code":7,"status_message":"Invalid API key: You must be granted a valid key.","success":false}`)
+	srv := tmdbtest.Start(t, http.StatusUnauthorized, `{"status_code":7,"status_message":"Invalid API key: You must be granted a valid key.","success":false}`)
 
 	seasons, err := Seasons(context.Background(), srv.URL, v4Token, "30984")
 	if err == nil || !strings.Contains(err.Error(), "401") {
