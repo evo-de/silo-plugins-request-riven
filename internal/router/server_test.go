@@ -492,3 +492,46 @@ func TestCheckStatusReadsTheSeasonTMDBDatesMatch(t *testing.T) {
 		t.Fatalf("want downloading/scraped, got %+v", st)
 	}
 }
+
+// TestCheckStatusAsksEachConnectionOnce checks that a connection's quality
+// tiers share one answer. riven-ts has no quality tiers, so asking again for
+// each tier would only repeat the same TMDB and riven-ts lookups.
+func TestCheckStatusAsksEachConnectionOnce(t *testing.T) {
+	stubs := renumberedShow()
+	stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":{"state":"processing","seasons":[3],"primaryMediaItem":{"state":"partially_completed","seasons":[{"number":3,"state":"scraped"}]}}}}`
+	srv := riventest.Start(t, stubs)
+	tmdbSrv := tmdbtest.Start(t, http.StatusOK, renumberedTMDB)
+
+	resp, err := (&Server{translator: translate.New(tmdbSrv.URL)}).CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
+		Request: &pluginv1.RequestDescriptor{
+			MediaType: "series", ExternalIds: map[string]string{"tvdb": "74796", "tmdb": "30984"},
+			Seasons: []int32{2},
+		},
+		Targets: []*pluginv1.TargetRef{
+			{Quality: "1080p", ConnectionId: "c1", ExternalId: "74796"},
+			{Quality: "2160p", ConnectionId: "c1", ExternalId: "74796"},
+		},
+		Connections: []*pluginv1.RouterConnection{tmdbConn(t, "c1", srv.URL, "tmdb-key")},
+	})
+	if err != nil {
+		t.Fatalf("CheckStatus: %v", err)
+	}
+	statuses := resp.GetStatuses()
+	if len(statuses) != 2 || statuses[0].GetQuality() != "1080p" || statuses[1].GetQuality() != "2160p" {
+		t.Fatalf("want a status for each quality, in order, got %+v", statuses)
+	}
+	for _, st := range statuses {
+		if st.GetStatus() != "downloading" || st.GetExternalStatus() != "scraped" {
+			t.Fatalf("want downloading/scraped, got %+v", st)
+		}
+	}
+	if paths := tmdbSrv.Paths(); len(paths) != 1 {
+		t.Fatalf("want one TMDB lookup, got %v", paths)
+	}
+	if calls := srv.CallsTo("itemRequestByExternalIds"); len(calls) != 1 {
+		t.Fatalf("want one status lookup, got %d", len(calls))
+	}
+	if calls := srv.CallsTo("seasons { number }"); len(calls) != 1 {
+		t.Fatalf("want one episode lookup, got %d", len(calls))
+	}
+}

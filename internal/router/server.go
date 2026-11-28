@@ -36,20 +36,26 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		qualities = []*pluginv1.RequestedQuality{{Id: "any"}}
 	}
 
-	var targets []*pluginv1.FulfillmentTarget
-	for _, c := range req.GetConnections() {
-		conn := connectionFromRouter(c)
-		status := "queued"
-		message, err := s.fulfillOn(ctx, conn, request)
+	answers := askEach(req.GetConnections(), func(conn Connection, client *httpclient.Client) (string, error) {
+		item, err := request.ItemOn(ctx, client, conn.TMDBKey)
 		if err != nil {
-			status, message = "failed", err.Error()
+			return "", err
+		}
+		return submit(ctx, client, item)
+	})
+
+	var targets []*pluginv1.FulfillmentTarget
+	for _, a := range answers {
+		status, message := "queued", a.value
+		if a.err != nil {
+			status, message = "failed", a.err.Error()
 		}
 		// Silo marks a requested quality with no target as failed, so every
 		// quality gets a copy of the one request's outcome.
 		for _, q := range qualities {
 			targets = append(targets, &pluginv1.FulfillmentTarget{
 				Quality:      q.GetId(),
-				ConnectionId: conn.ID,
+				ConnectionId: a.conn.ID,
 				ExternalId:   request.LookupID(),
 				Status:       status,
 				Message:      message,
@@ -60,15 +66,6 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		return &pluginv1.FulfillResponse{Message: "no riven connection configured"}, nil
 	}
 	return &pluginv1.FulfillResponse{Targets: targets}, nil
-}
-
-func (s *Server) fulfillOn(ctx context.Context, conn Connection, request translate.Request) (string, error) {
-	client := riven.NewClient(conn.BaseURL, conn.APIKey)
-	item, err := request.ItemOn(ctx, client, conn.TMDBKey)
-	if err != nil {
-		return "", err
-	}
-	return submit(ctx, client, item)
 }
 
 // submit asks riven-ts for the item. It does not send a request for some
@@ -97,39 +94,73 @@ func (s *Server) CheckStatus(ctx context.Context, req *pluginv1.CheckStatusReque
 		return &pluginv1.CheckStatusResponse{}, nil
 	}
 
-	byID := make(map[string]Connection, len(req.GetConnections()))
-	for _, c := range req.GetConnections() {
-		conn := connectionFromRouter(c)
-		byID[conn.ID] = conn
-	}
-
-	var statuses []*pluginv1.TargetStatus
+	// Ask only the connections some target names. riven-ts has no quality
+	// tiers, so a connection's targets share its one answer.
+	named := make(map[string]bool, len(req.GetTargets()))
 	for _, tref := range req.GetTargets() {
-		conn, ok := byID[tref.GetConnectionId()]
-		if !ok {
-			continue
-		}
-		client := riven.NewClient(conn.BaseURL, conn.APIKey)
+		named[tref.GetConnectionId()] = true
+	}
+	conns := slices.DeleteFunc(slices.Clone(req.GetConnections()), func(c *pluginv1.RouterConnection) bool { return !named[c.GetId()] })
+	answers := askEach(conns, func(conn Connection, client *httpclient.Client) (progress, error) {
 		item, err := request.ItemOn(ctx, client, conn.TMDBKey)
 		if err != nil {
-			continue
+			return progress{}, err
 		}
 		state, err := riven.ItemStatus(ctx, client, item)
 		if err != nil {
-			continue
+			return progress{}, err
 		}
 		if len(item.Seasons) > 0 && state.Seasons != nil {
 			state.Media = seasonsState(state.Seasons, item.Seasons)
 		}
 		status, externalStatus := mapState(state)
+		return progress{status: status, externalStatus: externalStatus}, nil
+	})
+	byID := make(map[string]answer[progress], len(answers))
+	for _, a := range answers {
+		byID[a.conn.ID] = a
+	}
+
+	var statuses []*pluginv1.TargetStatus
+	for _, tref := range req.GetTargets() {
+		a, ok := byID[tref.GetConnectionId()]
+		if !ok || a.err != nil {
+			// An unknown connection, or a lookup that failed: skip it and let
+			// the next cycle retry.
+			continue
+		}
 		statuses = append(statuses, &pluginv1.TargetStatus{
 			Quality:        tref.GetQuality(),
 			ConnectionId:   tref.GetConnectionId(),
-			Status:         status,
-			ExternalStatus: externalStatus,
+			Status:         a.value.status,
+			ExternalStatus: a.value.externalStatus,
 		})
 	}
 	return &pluginv1.CheckStatusResponse{Statuses: statuses}, nil
+}
+
+// progress is a connection's answer to CheckStatus.
+type progress struct {
+	status, externalStatus string
+}
+
+// answer is one connection's reply in a fan-out.
+type answer[T any] struct {
+	conn  Connection
+	value T
+	err   error
+}
+
+// askEach asks each connection once, in order, with one riven-ts client per
+// connection. A failure stays with the connection it happened on.
+func askEach[T any](conns []*pluginv1.RouterConnection, ask func(Connection, *httpclient.Client) (T, error)) []answer[T] {
+	answers := make([]answer[T], 0, len(conns))
+	for _, c := range conns {
+		conn := connectionFromRouter(c)
+		value, err := ask(conn, riven.NewClient(conn.BaseURL, conn.APIKey))
+		answers = append(answers, answer[T]{conn: conn, value: value, err: err})
+	}
+	return answers
 }
 
 var mediaStatuses = map[string]string{
