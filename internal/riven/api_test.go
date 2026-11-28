@@ -28,6 +28,37 @@ func TestNewClientSendsBearerToken(t *testing.T) {
 	}
 }
 
+func TestItemForPicksTheIDRivenTracksBy(t *testing.T) {
+	all := map[string]string{"tmdb": "329865", "tvdb": "371980", "imdb": "tt2543164"}
+	cases := []struct {
+		name        string
+		mediaType   MediaType
+		ids         map[string]string
+		want        Item
+		wantMissing string
+	}{
+		{"movie by TMDB", Movie, all, Item{Type: Movie, ID: "329865"}, ""},
+		{"show by TVDB", Show, all, Item{Type: Show, ID: "371980"}, ""},
+		{"movie without TMDB", Movie, map[string]string{"tvdb": "1", "imdb": "tt2543164"}, Item{}, "TMDB"},
+		{"show without TVDB", Show, map[string]string{"tmdb": "95396", "imdb": "tt11280740"}, Item{}, "TVDB"},
+		{"no ids", Movie, nil, Item{}, "TMDB"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ItemFor(tc.mediaType, tc.ids)
+			if tc.wantMissing != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantMissing) {
+					t.Fatalf("want an error naming %s, got %+v, %v", tc.wantMissing, got, err)
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("want %+v, got %+v, %v", tc.want, got, err)
+			}
+		})
+	}
+}
+
 func TestRequestItemSendsOnlyTheItemsID(t *testing.T) {
 	cases := []struct {
 		name      string

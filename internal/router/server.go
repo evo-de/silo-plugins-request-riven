@@ -25,21 +25,16 @@ func New() *Server { return &Server{tmdbURL: tmdb.BaseURL} }
 
 const requestedBySilo = "silo"
 
-// rivenItem never falls back to IMDb. riven-ts accepts an IMDb-only request
-// and then never indexes it. A movie fails with "Item request is missing
-// tmdbId", and the TVDB indexer cannot look up a show by IMDb id.
 func rivenItem(d *pluginv1.RequestDescriptor) (riven.Item, error) {
-	ids := d.GetExternalIds()
-	if d.GetMediaType() == "series" {
-		if id := ids["tvdb"]; id != "" {
-			return riven.Item{Type: riven.Show, ID: id, Seasons: d.GetSeasons()}, nil
-		}
-		return riven.Item{}, errors.New("request has no TVDB id; riven-ts tracks shows by TVDB id")
+	if d.GetMediaType() != "series" {
+		return riven.ItemFor(riven.Movie, d.GetExternalIds())
 	}
-	if id := ids["tmdb"]; id != "" {
-		return riven.Item{Type: riven.Movie, ID: id}, nil
+	item, err := riven.ItemFor(riven.Show, d.GetExternalIds())
+	if err != nil {
+		return riven.Item{}, err
 	}
-	return riven.Item{}, errors.New("request has no TMDB id; riven-ts tracks movies by TMDB id")
+	item.Seasons = d.GetSeasons()
+	return item, nil
 }
 
 func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pluginv1.FulfillResponse, error) {

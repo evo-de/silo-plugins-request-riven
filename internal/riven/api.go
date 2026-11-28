@@ -2,6 +2,7 @@ package riven
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -43,6 +44,26 @@ type Item struct {
 	// Seasons lists the requested season numbers of a show. Empty means the
 	// whole show.
 	Seasons []int32
+}
+
+// ItemFor returns the item riven-ts tracks the media by: a movie by its TMDB
+// id, a show by its TVDB id. ids holds external ids keyed "tmdb", "tvdb" and
+// "imdb". The item has no seasons, so it stands for a whole show.
+//
+// It never falls back to IMDb. riven-ts accepts an IMDb-only request and then
+// never indexes it. A movie fails with "Item request is missing tmdbId", and
+// the TVDB indexer cannot look up a show by IMDb id.
+func ItemFor(mediaType MediaType, ids map[string]string) (Item, error) {
+	if mediaType == Show {
+		if id := ids["tvdb"]; id != "" {
+			return Item{Type: Show, ID: id}, nil
+		}
+		return Item{}, errors.New("request has no TVDB id; riven-ts tracks shows by TVDB id")
+	}
+	if id := ids["tmdb"]; id != "" {
+		return Item{Type: Movie, ID: id}, nil
+	}
+	return Item{}, errors.New("request has no TMDB id; riven-ts tracks movies by TMDB id")
 }
 
 func (i Item) idField() string {
