@@ -2,11 +2,8 @@ package router
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,45 +12,9 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/evo-de/silo-plugins-request-riven/internal/riven"
+	"github.com/evo-de/silo-plugins-request-riven/internal/riven/riventest"
+	"github.com/evo-de/silo-plugins-request-riven/internal/tmdb/tmdbtest"
 )
-
-const unauthenticated = `{"data":null,"errors":[{"message":"Access denied! You need to be authenticated to perform this action!","extensions":{"code":"UNAUTHENTICATED"}}]}`
-
-type gqlBody struct {
-	Query     string         `json:"query"`
-	Variables map[string]any `json:"variables"`
-}
-
-type fakeRiven struct {
-	byQuerySubstring map[string]string
-	received         []gqlBody
-}
-
-func (f *fakeRiven) handler(t *testing.T) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body gqlBody
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		f.received = append(f.received, body)
-		for substr, resp := range f.byQuerySubstring {
-			if strings.Contains(body.Query, substr) {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(resp))
-				return
-			}
-		}
-		http.Error(w, "no stub matched query: "+body.Query, http.StatusNotFound)
-	})
-}
-
-func startFakeRiven(t *testing.T, byQuerySubstring map[string]string) (*httptest.Server, *fakeRiven) {
-	t.Helper()
-	f := &fakeRiven{byQuerySubstring: byQuerySubstring}
-	srv := httptest.NewServer(f.handler(t))
-	t.Cleanup(srv.Close)
-	return srv, f
-}
 
 func routerConn(id, baseURL string) *pluginv1.RouterConnection {
 	return &pluginv1.RouterConnection{Id: id, BaseUrl: baseURL, ApiKey: "k"}
@@ -83,7 +44,7 @@ func TestFulfillRequestsItemByItsRivenID(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, f := startFakeRiven(t, requested)
+			srv := riventest.Start(t, requested)
 
 			resp, err := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
 				Request:     tc.request,
@@ -101,11 +62,11 @@ func TestFulfillRequestsItemByItsRivenID(t *testing.T) {
 				tgt.GetExternalStatus() != "" || tgt.GetMessage() != "requested in riven" {
 				t.Fatalf("bad target: %+v", tgt)
 			}
-			if len(f.received) != 1 {
-				t.Fatalf("want 1 riven call, got %d", len(f.received))
+			if len(srv.Calls()) != 1 {
+				t.Fatalf("want 1 riven call, got %d", len(srv.Calls()))
 			}
-			if want := map[string]any{"input": tc.wantInput}; !reflect.DeepEqual(f.received[0].Variables, want) {
-				t.Fatalf("riven received %v, want %v", f.received[0].Variables, want)
+			if want := map[string]any{"input": tc.wantInput}; !reflect.DeepEqual(srv.Calls()[0].Variables, want) {
+				t.Fatalf("riven received %v, want %v", srv.Calls()[0].Variables, want)
 			}
 		})
 	}
@@ -116,7 +77,7 @@ func TestFulfillRequestsItemByItsRivenID(t *testing.T) {
 // per requested quality, and a tier with none comes back gets marked failed
 // even though riven (which has no per-quality profiles) is handling it fine.
 func TestFulfillMultipleQualitiesShareOneRequest(t *testing.T) {
-	srv, f := startFakeRiven(t, requested)
+	srv := riventest.Start(t, requested)
 
 	resp, err := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
 		Request:     &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Arrival", ExternalIds: map[string]string{"tmdb": "42"}},
@@ -142,8 +103,8 @@ func TestFulfillMultipleQualitiesShareOneRequest(t *testing.T) {
 			t.Fatalf("bad %s target: %+v", q, tgt)
 		}
 	}
-	if len(f.received) != 1 {
-		t.Fatalf("want 1 riven call for 2 qualities on the same connection, got %d", len(f.received))
+	if len(srv.Calls()) != 1 {
+		t.Fatalf("want 1 riven call for 2 qualities on the same connection, got %d", len(srv.Calls()))
 	}
 }
 
@@ -158,7 +119,7 @@ func TestFulfillRefusesRequestWithoutRivenID(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, f := startFakeRiven(t, requested)
+			srv := riventest.Start(t, requested)
 
 			resp, err := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
 				Request:     tc.request,
@@ -171,16 +132,16 @@ func TestFulfillRefusesRequestWithoutRivenID(t *testing.T) {
 			if len(resp.GetTargets()) != 0 || !strings.Contains(resp.GetMessage(), tc.wantMissing) {
 				t.Fatalf("want no targets and a message naming %s, got %+v", tc.wantMissing, resp)
 			}
-			if len(f.received) != 0 {
-				t.Fatalf("want no riven call, got %d", len(f.received))
+			if len(srv.Calls()) != 0 {
+				t.Fatalf("want no riven call, got %d", len(srv.Calls()))
 			}
 		})
 	}
 }
 
 func TestFulfillPartialContainmentAcrossConnections(t *testing.T) {
-	okSrv, _ := startFakeRiven(t, requested)
-	errSrv, _ := startFakeRiven(t, map[string]string{"requestItem": unauthenticated})
+	okSrv := riventest.Start(t, requested)
+	errSrv := riventest.Start(t, map[string]string{"requestItem": riventest.Unauthenticated})
 
 	resp, err := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
 		Request: &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Arrival", ExternalIds: map[string]string{"tmdb": "42"}},
@@ -229,7 +190,7 @@ func TestCheckStatusMapsRivenState(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, _ := startFakeRiven(t, map[string]string{
+			srv := riventest.Start(t, map[string]string{
 				"itemRequestByExternalIds": `{"data":{"itemRequestByExternalIds":` + tc.request + `}}`,
 			})
 
@@ -253,10 +214,10 @@ func TestCheckStatusMapsRivenState(t *testing.T) {
 }
 
 func TestCheckStatusSkipsFailedLookup(t *testing.T) {
-	okSrv, _ := startFakeRiven(t, map[string]string{
+	okSrv := riventest.Start(t, map[string]string{
 		"itemRequestByExternalIds": `{"data":{"itemRequestByExternalIds":{"state":"ongoing","primaryMediaItem":{"state":"scraped"}}}}`,
 	})
-	errSrv, _ := startFakeRiven(t, map[string]string{"itemRequestByExternalIds": unauthenticated})
+	errSrv := riventest.Start(t, map[string]string{"itemRequestByExternalIds": riventest.Unauthenticated})
 
 	resp, err := New().CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
 		Request: &pluginv1.RequestDescriptor{MediaType: "series", ExternalIds: map[string]string{"tvdb": "99"}},
@@ -289,10 +250,10 @@ func TestCheckStatusSkipsUnknownConnection(t *testing.T) {
 }
 
 func TestTestConnection(t *testing.T) {
-	validSrv, _ := startFakeRiven(t, map[string]string{
+	validSrv := riventest.Start(t, map[string]string{
 		"instanceStatus": `{"data":{"instanceStatus":{"restartRequired":false}}}`,
 	})
-	rejectSrv, _ := startFakeRiven(t, map[string]string{"instanceStatus": unauthenticated})
+	rejectSrv := riventest.Start(t, map[string]string{"instanceStatus": riventest.Unauthenticated})
 
 	cases := []struct {
 		name    string
@@ -361,14 +322,14 @@ func TestFulfillRequestsOnlyTheSeasonsSiloAsksFor(t *testing.T) {
 		{
 			name:        "lookup rejected",
 			seasons:     []int32{3},
-			existing:    unauthenticated,
+			existing:    riventest.Unauthenticated,
 			wantStatus:  "failed",
 			wantMessage: "Access denied",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, f := startFakeRiven(t, map[string]string{
+			srv := riventest.Start(t, map[string]string{
 				"itemRequestByExternalIds": tc.existing,
 				"requestItem(":             `{"data":{"requestItem":true}}`,
 			})
@@ -394,7 +355,7 @@ func TestFulfillRequestsOnlyTheSeasonsSiloAsksFor(t *testing.T) {
 			}
 
 			var sent []any
-			for _, call := range f.received {
+			for _, call := range srv.Calls() {
 				if strings.Contains(call.Query, "requestItem(") {
 					sent = call.Variables["input"].(map[string]any)["requestedSeasons"].([]any)
 				}
@@ -427,7 +388,7 @@ func TestCheckStatusReadsTheRequestedSeasons(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, _ := startFakeRiven(t, map[string]string{
+			srv := riventest.Start(t, map[string]string{
 				"itemRequestByExternalIds": `{"data":{"itemRequestByExternalIds":` + tc.request + `}}`,
 			})
 
@@ -499,28 +460,9 @@ func TestRivenSeasonsMatchesByAirDate(t *testing.T) {
 	}
 }
 
-// tvdbShow answers riven-ts's TVDB lookup for a show with one 12-episode
-// weekly season per start date, numbered from 1.
-func tvdbShow(starts ...string) map[string]string {
-	var numbers, seasons []string
-	for i, start := range starts {
-		var eps []string
-		for _, e := range weekly(1, 12, start) {
-			eps = append(eps, `{"number":`+strconv.Itoa(int(e.Number))+`,"airDate":"`+e.AirDate+`T00:00:00.000Z"}`)
-		}
-		n := strconv.Itoa(i + 1)
-		numbers = append(numbers, `{"number":`+n+`}`)
-		seasons = append(seasons, `"s`+n+`":{"episodes":[`+strings.Join(eps, ",")+`]}`)
-	}
-	return map[string]string{
-		"seasons { number }": `{"data":{"tmdbItem":{"seasons":[` + strings.Join(numbers, ",") + `]}}}`,
-		"season(number:":     `{"data":{"tmdbItem":{` + strings.Join(seasons, ",") + `}}}`,
-	}
-}
-
 // splitShow answers riven-ts's TVDB lookup for a show that riven-ts splits
 // into two 12-episode seasons, while Silo counts one 24-episode season.
-func splitShow() map[string]string { return tvdbShow("2024-01-07", "2024-07-07") }
+func splitShow() map[string]string { return riventest.WeeklySeasons("2024-01-07", "2024-07-07") }
 
 var oneLongSeason = []*pluginv1.RequestedSeason{{Number: 1, FirstAirDate: "2024-01-07", EpisodeCount: 24}}
 
@@ -528,7 +470,7 @@ func TestFulfillRequestsTheSeasonsTheAirDatesMatch(t *testing.T) {
 	stubs := splitShow()
 	stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":null}}`
 	stubs["requestItem("] = `{"data":{"requestItem":true}}`
-	srv, f := startFakeRiven(t, stubs)
+	srv := riventest.Start(t, stubs)
 
 	resp, err := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
 		Request: &pluginv1.RequestDescriptor{
@@ -543,14 +485,15 @@ func TestFulfillRequestsTheSeasonsTheAirDatesMatch(t *testing.T) {
 	if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "queued" {
 		t.Fatalf("want a queued target, got %+v", tgt)
 	}
-	last := f.received[len(f.received)-1]
+	calls := srv.Calls()
+	last := calls[len(calls)-1]
 	if got := last.Variables["input"].(map[string]any)["requestedSeasons"]; !reflect.DeepEqual(got, []any{1.0, 2.0}) {
 		t.Fatalf("riven was asked for seasons %v, want [1 2]", got)
 	}
 }
 
 func TestFulfillFailsWhenTheEpisodeLookupFails(t *testing.T) {
-	srv, f := startFakeRiven(t, map[string]string{"seasons { number }": unauthenticated, "requestItem(": `{"data":{"requestItem":true}}`})
+	srv := riventest.Start(t, map[string]string{"seasons { number }": riventest.Unauthenticated, "requestItem(": `{"data":{"requestItem":true}}`})
 
 	resp, err := New().Fulfill(context.Background(), &pluginv1.FulfillRequest{
 		Request: &pluginv1.RequestDescriptor{
@@ -565,7 +508,7 @@ func TestFulfillFailsWhenTheEpisodeLookupFails(t *testing.T) {
 	if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "failed" || !strings.Contains(tgt.GetMessage(), "Access denied") {
 		t.Fatalf("want a failed target with riven's message, got %+v", tgt)
 	}
-	for _, call := range f.received {
+	for _, call := range srv.Calls() {
 		if strings.Contains(call.Query, "requestItem(") {
 			t.Fatal("want no request when the lookup fails")
 		}
@@ -575,7 +518,7 @@ func TestFulfillFailsWhenTheEpisodeLookupFails(t *testing.T) {
 func TestCheckStatusReadsTheSeasonsTheAirDatesMatch(t *testing.T) {
 	stubs := splitShow()
 	stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":{"state":"processing","seasons":[1,2],"primaryMediaItem":{"state":"partially_completed","seasons":[{"number":1,"state":"completed"},{"number":2,"state":"indexed"}]}}}}`
-	srv, _ := startFakeRiven(t, stubs)
+	srv := riventest.Start(t, stubs)
 
 	resp, err := New().CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
 		Request: &pluginv1.RequestDescriptor{
@@ -598,7 +541,7 @@ func TestCheckStatusReadsTheSeasonsTheAirDatesMatch(t *testing.T) {
 // into three seasons. TMDB counts TVDB's first two as its season 1, and TVDB's
 // third as its season 2, the way it numbers Bleach.
 func renumberedShow() map[string]string {
-	return tvdbShow("2004-01-04", "2004-04-04", "2022-10-09")
+	return riventest.WeeklySeasons("2004-01-04", "2004-04-04", "2022-10-09")
 }
 
 const renumberedTMDB = `{"id":30984,"seasons":[
@@ -606,21 +549,6 @@ const renumberedTMDB = `{"id":30984,"seasons":[
 	{"air_date":"2004-01-04","episode_count":24,"season_number":1},
 	{"air_date":"2022-10-09","episode_count":12,"season_number":2}
 ]}`
-
-// startFakeTMDB answers every request with status and body, and records the
-// path of each request.
-func startFakeTMDB(t *testing.T, status int, body string) (*httptest.Server, *[]string) {
-	t.Helper()
-	var paths []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		paths = append(paths, r.URL.Path)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = w.Write([]byte(body))
-	}))
-	t.Cleanup(srv.Close)
-	return srv, &paths
-}
 
 func tmdbConn(t *testing.T, id, baseURL, tmdbKey string) *pluginv1.RouterConnection {
 	t.Helper()
@@ -674,8 +602,8 @@ func TestFulfillReadsMissingAirDatesFromTMDB(t *testing.T) {
 			stubs := renumberedShow()
 			stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":null}}`
 			stubs["requestItem("] = `{"data":{"requestItem":true}}`
-			srv, f := startFakeRiven(t, stubs)
-			tmdbSrv, tmdbPaths := startFakeTMDB(t, http.StatusOK, renumberedTMDB)
+			srv := riventest.Start(t, stubs)
+			tmdbSrv := tmdbtest.Start(t, http.StatusOK, renumberedTMDB)
 
 			resp, err := (&Server{tmdbURL: tmdbSrv.URL}).Fulfill(context.Background(), &pluginv1.FulfillRequest{
 				Request: &pluginv1.RequestDescriptor{
@@ -690,12 +618,13 @@ func TestFulfillReadsMissingAirDatesFromTMDB(t *testing.T) {
 			if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "queued" {
 				t.Fatalf("want a queued target, got %+v", tgt)
 			}
-			last := f.received[len(f.received)-1]
+			calls := srv.Calls()
+			last := calls[len(calls)-1]
 			if got := last.Variables["input"].(map[string]any)["requestedSeasons"]; !reflect.DeepEqual(got, tc.wantSeasons) {
 				t.Fatalf("riven was asked for seasons %v, want %v", got, tc.wantSeasons)
 			}
-			if !reflect.DeepEqual(*tmdbPaths, tc.wantTMDBPaths) {
-				t.Fatalf("TMDB received %v, want %v", *tmdbPaths, tc.wantTMDBPaths)
+			if !reflect.DeepEqual(tmdbSrv.Paths(), tc.wantTMDBPaths) {
+				t.Fatalf("TMDB received %v, want %v", tmdbSrv.Paths(), tc.wantTMDBPaths)
 			}
 		})
 	}
@@ -705,8 +634,8 @@ func TestFulfillFailsWhenTMDBFails(t *testing.T) {
 	stubs := renumberedShow()
 	stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":null}}`
 	stubs["requestItem("] = `{"data":{"requestItem":true}}`
-	srv, f := startFakeRiven(t, stubs)
-	tmdbSrv, _ := startFakeTMDB(t, http.StatusUnauthorized, `{"status_code":7,"status_message":"Invalid API key: You must be granted a valid key.","success":false}`)
+	srv := riventest.Start(t, stubs)
+	tmdbSrv := tmdbtest.Start(t, http.StatusUnauthorized, `{"status_code":7,"status_message":"Invalid API key: You must be granted a valid key.","success":false}`)
 
 	resp, err := (&Server{tmdbURL: tmdbSrv.URL}).Fulfill(context.Background(), &pluginv1.FulfillRequest{
 		Request: &pluginv1.RequestDescriptor{
@@ -721,7 +650,7 @@ func TestFulfillFailsWhenTMDBFails(t *testing.T) {
 	if tgt := resp.GetTargets()[0]; tgt.GetStatus() != "failed" || !strings.Contains(tgt.GetMessage(), "401") {
 		t.Fatalf("want a failed target naming TMDB's status, got %+v", tgt)
 	}
-	for _, call := range f.received {
+	for _, call := range srv.Calls() {
 		if strings.Contains(call.Query, "requestItem(") {
 			t.Fatal("want no request when the TMDB lookup fails")
 		}
@@ -731,8 +660,8 @@ func TestFulfillFailsWhenTMDBFails(t *testing.T) {
 func TestCheckStatusReadsTheSeasonTMDBDatesMatch(t *testing.T) {
 	stubs := renumberedShow()
 	stubs["itemRequestByExternalIds"] = `{"data":{"itemRequestByExternalIds":{"state":"processing","seasons":[2,3],"primaryMediaItem":{"state":"partially_completed","seasons":[{"number":1,"state":"completed"},{"number":2,"state":"completed"},{"number":3,"state":"scraped"}]}}}}`
-	srv, _ := startFakeRiven(t, stubs)
-	tmdbSrv, _ := startFakeTMDB(t, http.StatusOK, renumberedTMDB)
+	srv := riventest.Start(t, stubs)
+	tmdbSrv := tmdbtest.Start(t, http.StatusOK, renumberedTMDB)
 
 	resp, err := (&Server{tmdbURL: tmdbSrv.URL}).CheckStatus(context.Background(), &pluginv1.CheckStatusRequest{
 		Request: &pluginv1.RequestDescriptor{
