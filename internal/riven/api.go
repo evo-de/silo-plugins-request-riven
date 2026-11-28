@@ -41,8 +41,8 @@ const (
 type Item struct {
 	Type MediaType
 	ID   string
-	// Seasons lists the requested season numbers of a show. Empty means the
-	// whole show.
+	// Seasons lists the riven-ts seasons of a show to ask for, numbered the
+	// way TVDB numbers them. Empty means the whole show.
 	Seasons []int32
 }
 
